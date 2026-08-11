@@ -2,3 +2,5 @@ discord.py
 deep-translator
 aiohttp
 python-dotenv
+flask
+gunicorn
