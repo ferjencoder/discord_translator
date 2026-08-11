@@ -1,6 +1,13 @@
+import os
+import threading
 import discord
 import aiohttp
+from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
+from flask import Flask
+
+# Load environment variables from .env if running locally
+load_dotenv()
 
 # -------------------------------------------------------------------
 # CONFIGURATION MAP: Connect Channel ID -> Language Code & Webhook
