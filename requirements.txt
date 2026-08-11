@@ -1,6 +1,6 @@
-discord.py
-deep-translator
 aiohttp
-python-dotenv
+deep-translator
+discord.py
 flask
 gunicorn
+python-dotenv
