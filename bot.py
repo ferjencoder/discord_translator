@@ -43,7 +43,7 @@ CHANNEL_MAP = {
     }
 }
 
-TOKEN = DISCORD_TOKEN
+TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Initialize Discord Client with Message Content Intent
 intents = discord.Intents.default()
