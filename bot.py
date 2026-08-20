@@ -79,15 +79,15 @@ CHANNEL_MAP = {
         "lang": "ceb",  # Bisaya / Cebuano
         "webhook": os.getenv("WEBHOOK_CEB")
     },
-    1536508780000000000: {  # Replace with your Russian channel ID
+    1538166128017412096: {
         "lang": "ru",
         "webhook": os.getenv("WEBHOOK_RU")
     },
-    1536508820000000000: {  # Replace with your Arabic channel ID
+    1538166161873567794: {
         "lang": "ar",
         "webhook": os.getenv("WEBHOOK_AR")
     },
-    1536508860000000000: {  # Replace with your Norwegian channel ID
+    1538637390149587025: {
         "lang": "no",
         "webhook": os.getenv("WEBHOOK_NO")
     }
