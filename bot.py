@@ -162,9 +162,12 @@ def build_bot_client():
         source_lang = CHANNEL_MAP[source_channel_id]["lang"]
         text_to_translate = message.content
 
+        # Collect all media assets: standard files, stickers, and embedded GIF/media links
         attachment_urls = [att.url for att in message.attachments]
         sticker_urls = [sticker.url for sticker in message.stickers]
-        media_urls = attachment_urls + sticker_urls
+        embed_urls = [e.url for e in message.embeds if e.url and e.type in ('gifv', 'image', 'video')]
+
+        media_urls = attachment_urls + sticker_urls + embed_urls
         has_media = len(media_urls) > 0
 
         if not text_to_translate.strip() and not has_media:
