@@ -29,6 +29,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
 
+# Start Flask once in a daemon thread
 threading.Thread(target=run_flask, daemon=True).start()
 
 async def keep_alive_ping():
@@ -65,21 +66,6 @@ CHANNEL_MAP = {
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 PROTECTION_PATTERN = re.compile(r"(<a?:[a-zA-Z0-9_]+:\d+>|<@!?\d+>|<@&\d+>)")
-
-intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
-# Persistent session pool for webhooks
-http_session: aiohttp.ClientSession = None
-
-@client.event
-async def on_ready():
-    global http_session
-    if http_session is None or http_session.closed:
-        http_session = aiohttp.ClientSession()
-    logging.info(f"Translator bot operational as {client.user}")
-    client.loop.create_task(keep_alive_ping())
 
 def chunk_text(text, max_length=1900):
     return [text[i:i + max_length] for i in range(0, len(text), max_length)]
@@ -119,7 +105,7 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
 
     return translated
 
-async def post_webhook_with_retry(webhook_url, payload, max_retries=5):
+async def post_webhook_with_retry(http_session, webhook_url, payload, max_retries=5):
     """Posts payload to Discord Webhook with smart rate-limit backing off."""
     for attempt in range(1, max_retries + 1):
         try:
@@ -144,70 +130,88 @@ async def post_webhook_with_retry(webhook_url, payload, max_retries=5):
         await asyncio.sleep(1.0)
     return False
 
-@client.event
-async def on_message(message):
-    if message.author.bot or message.webhook_id:
-        return
+def build_bot_client():
+    """Creates a fresh Discord Client instance."""
+    intents = discord.Intents.default()
+    intents.message_content = True
+    client = discord.Client(intents=intents)
+    http_session = None
 
-    source_channel_id = message.channel.id
+    @client.event
+    async def on_ready():
+        nonlocal http_session
+        if http_session is None or http_session.closed:
+            http_session = aiohttp.ClientSession()
+        logging.info(f"Translator bot operational as {client.user}")
+        client.loop.create_task(keep_alive_ping())
 
-    if source_channel_id not in CHANNEL_MAP:
-        return
+    @client.event
+    async def on_message(message):
+        if message.author.bot or message.webhook_id:
+            return
 
-    source_lang = CHANNEL_MAP[source_channel_id]["lang"]
-    text_to_translate = message.content
+        source_channel_id = message.channel.id
 
-    attachment_urls = [att.url for att in message.attachments]
-    has_attachments = len(attachment_urls) > 0
+        if source_channel_id not in CHANNEL_MAP:
+            return
 
-    if not text_to_translate.strip() and not has_attachments:
-        return
+        source_lang = CHANNEL_MAP[source_channel_id]["lang"]
+        text_to_translate = message.content
 
-    logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}'")
+        attachment_urls = [att.url for att in message.attachments]
+        has_attachments = len(attachment_urls) > 0
 
-    for target_id, config in CHANNEL_MAP.items():
-        if target_id == source_channel_id:
-            continue
+        if not text_to_translate.strip() and not has_attachments:
+            return
 
-        target_lang = config["lang"]
-        webhook_url = config["webhook"]
+        logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}'")
 
-        if not webhook_url:
-            logging.warning(f"❌ Cannot send to [{target_lang.upper()}]: WEBHOOK URL IS MISSING OR NULL!")
-            continue
+        for target_id, config in CHANNEL_MAP.items():
+            if target_id == source_channel_id:
+                continue
 
-        if text_to_translate.strip():
-            translated_text = await translate_text_with_retry(text_to_translate, target_lang)
-        else:
-            translated_text = ""
+            target_lang = config["lang"]
+            webhook_url = config["webhook"]
 
-        if has_attachments:
-            attachments_str = "\n".join(attachment_urls)
-            translated_text = f"{translated_text}\n{attachments_str}".strip()
+            if not webhook_url:
+                logging.warning(f"❌ Cannot send to [{target_lang.upper()}]: WEBHOOK URL IS MISSING OR NULL!")
+                continue
 
-        chunks = chunk_text(translated_text)
+            if text_to_translate.strip():
+                translated_text = await translate_text_with_retry(text_to_translate, target_lang)
+            else:
+                translated_text = ""
 
-        for chunk in chunks:
-            payload = {
-                "content": chunk,
-                "username": f"{message.author.display_name} ({source_lang.upper()})",
-                "avatar_url": str(message.author.display_avatar.url)
-            }
-            success = await post_webhook_with_retry(webhook_url, payload)
-            if not success:
-                logging.error(f"❌ Failed to post webhook message to [{target_lang.upper()}]")
-            
-            # Stagger dispatching across channels to avoid burst limits
-            await asyncio.sleep(0.15)
+            if has_attachments:
+                attachments_str = "\n".join(attachment_urls)
+                translated_text = f"{translated_text}\n{attachments_str}".strip()
+
+            chunks = chunk_text(translated_text)
+
+            for chunk in chunks:
+                payload = {
+                    "content": chunk,
+                    "username": f"{message.author.display_name} ({source_lang.upper()})",
+                    "avatar_url": str(message.author.display_avatar.url)
+                }
+                success = await post_webhook_with_retry(http_session, webhook_url, payload)
+                if not success:
+                    logging.error(f"❌ Failed to post webhook message to [{target_lang.upper()}]")
+                
+                # Stagger dispatching across channels
+                await asyncio.sleep(0.15)
+
+    return client
 
 if __name__ == "__main__":
     while True:
         try:
+            client = build_bot_client()
             client.run(TOKEN)
             break
         except discord.errors.HTTPException as e:
             if e.status == 429:
-                logging.warning("⚠️ Discord API global IP rate limit hit on startup. Sleeping 30s before retrying connection...")
+                logging.warning("⚠️ Discord API global IP rate limit hit on startup. Sleeping 30s before retrying...")
                 time.sleep(30)
             else:
                 raise e
