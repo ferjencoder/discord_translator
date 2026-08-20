@@ -100,10 +100,11 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
             await asyncio.sleep(delay)
             delay *= 2
 
-    for placeholder, original in placeholder_map.items():
-        translated = translated.replace(placeholder, original)
+    if translated:
+        for placeholder, original in placeholder_map.items():
+            translated = translated.replace(placeholder, original)
 
-    return translated
+    return translated or text
 
 async def post_webhook_with_retry(http_session, webhook_url, payload, max_retries=5):
     """Posts payload to Discord Webhook with smart rate-limit backing off."""
@@ -137,11 +138,15 @@ def build_bot_client():
     client = discord.Client(intents=intents)
     http_session = None
 
-    @client.event
-    async def on_ready():
+    async def get_http_session():
         nonlocal http_session
         if http_session is None or http_session.closed:
             http_session = aiohttp.ClientSession()
+        return http_session
+
+    @client.event
+    async def on_ready():
+        await get_http_session()
         logging.info(f"Translator bot operational as {client.user}")
         client.loop.create_task(keep_alive_ping())
 
@@ -166,6 +171,8 @@ def build_bot_client():
 
         logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}'")
 
+        session = await get_http_session()
+
         for target_id, config in CHANNEL_MAP.items():
             if target_id == source_channel_id:
                 continue
@@ -173,33 +180,39 @@ def build_bot_client():
             target_lang = config["lang"]
             webhook_url = config["webhook"]
 
-            if not webhook_url:
-                logging.warning(f"❌ Cannot send to [{target_lang.upper()}]: WEBHOOK URL IS MISSING OR NULL!")
-                continue
+            # Isolated execution per target channel
+            try:
+                if not webhook_url:
+                    logging.warning(f"⚠️ Skipped [{target_lang.upper()}]: WEBHOOK URL IS MISSING IN ENV VARS!")
+                    continue
 
-            if text_to_translate.strip():
-                translated_text = await translate_text_with_retry(text_to_translate, target_lang)
-            else:
-                translated_text = ""
+                if text_to_translate.strip():
+                    translated_text = await translate_text_with_retry(text_to_translate, target_lang)
+                else:
+                    translated_text = ""
 
-            if has_attachments:
-                attachments_str = "\n".join(attachment_urls)
-                translated_text = f"{translated_text}\n{attachments_str}".strip()
+                if has_attachments:
+                    attachments_str = "\n".join(attachment_urls)
+                    translated_text = f"{translated_text}\n{attachments_str}".strip()
 
-            chunks = chunk_text(translated_text)
+                chunks = chunk_text(translated_text)
 
-            for chunk in chunks:
-                payload = {
-                    "content": chunk,
-                    "username": f"{message.author.display_name} ({source_lang.upper()})",
-                    "avatar_url": str(message.author.display_avatar.url)
-                }
-                success = await post_webhook_with_retry(http_session, webhook_url, payload)
-                if not success:
-                    logging.error(f"❌ Failed to post webhook message to [{target_lang.upper()}]")
-                
-                # Stagger dispatching across channels
-                await asyncio.sleep(0.15)
+                for chunk in chunks:
+                    payload = {
+                        "content": chunk,
+                        "username": f"{message.author.display_name} ({source_lang.upper()})",
+                        "avatar_url": str(message.author.display_avatar.url)
+                    }
+                    success = await post_webhook_with_retry(session, webhook_url, payload)
+                    if success:
+                        logging.info(f"✅ Dispatched translation to [{target_lang.upper()}]")
+                    else:
+                        logging.error(f"❌ Webhook post failed for [{target_lang.upper()}]")
+                    
+                    await asyncio.sleep(0.15)
+
+            except Exception as e:
+                logging.error(f"💥 Exception caught while dispatching to [{target_lang.upper()}]: {e}")
 
     return client
 
