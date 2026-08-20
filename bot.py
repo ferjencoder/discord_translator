@@ -163,13 +163,21 @@ def build_bot_client():
         source_lang = CHANNEL_MAP[source_channel_id]["lang"]
         text_to_translate = message.content
 
+        # 1. Collect standard file attachments
         attachment_urls = [att.url for att in message.attachments]
-        has_attachments = len(attachment_urls) > 0
 
-        if not text_to_translate.strip() and not has_attachments:
+        # 2. Collect sticker CDN URLs
+        sticker_urls = [sticker.url for sticker in message.stickers]
+
+        # Combine all media URLs
+        media_urls = attachment_urls + sticker_urls
+        has_media = len(media_urls) > 0
+
+        # Ignore if there's no text AND no media (stickers/attachments)
+        if not text_to_translate.strip() and not has_media:
             return
 
-        logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}'")
+        logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}' (Media: {len(media_urls)})")
 
         session = await get_http_session()
 
@@ -180,7 +188,6 @@ def build_bot_client():
             target_lang = config["lang"]
             webhook_url = config["webhook"]
 
-            # Isolated execution per target channel
             try:
                 if not webhook_url:
                     logging.warning(f"⚠️ Skipped [{target_lang.upper()}]: WEBHOOK URL IS MISSING IN ENV VARS!")
@@ -191,9 +198,10 @@ def build_bot_client():
                 else:
                     translated_text = ""
 
-                if has_attachments:
-                    attachments_str = "\n".join(attachment_urls)
-                    translated_text = f"{translated_text}\n{attachments_str}".strip()
+                # Append attachment and sticker URLs to the message text
+                if has_media:
+                    media_str = "\n".join(media_urls)
+                    translated_text = f"{translated_text}\n{media_str}".strip()
 
                 chunks = chunk_text(translated_text)
 
@@ -213,7 +221,7 @@ def build_bot_client():
 
             except Exception as e:
                 logging.error(f"💥 Exception caught while dispatching to [{target_lang.upper()}]: {e}")
-
+                
     return client
 
 if __name__ == "__main__":
