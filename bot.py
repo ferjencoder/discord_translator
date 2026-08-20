@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import asyncio
 import threading
 import logging
@@ -75,7 +76,8 @@ http_session: aiohttp.ClientSession = None
 @client.event
 async def on_ready():
     global http_session
-    http_session = aiohttp.ClientSession()
+    if http_session is None or http_session.closed:
+        http_session = aiohttp.ClientSession()
     logging.info(f"Translator bot operational as {client.user}")
     client.loop.create_task(keep_alive_ping())
 
@@ -125,9 +127,12 @@ async def post_webhook_with_retry(webhook_url, payload, max_retries=5):
                 if resp.status in (200, 204):
                     return True
                 elif resp.status == 429:
-                    data = await resp.json()
-                    # Respect Discord's exact retry_after duration
-                    retry_after = data.get("retry_after", 1.5)
+                    try:
+                        data = await resp.json()
+                        retry_after = float(data.get("retry_after", 1.5))
+                    except Exception:
+                        retry_after = 2.0
+                    
                     logging.warning(f"Webhook rate limited. Respecting Discord cooldown: {retry_after}s...")
                     await asyncio.sleep(retry_after)
                     continue
@@ -192,8 +197,20 @@ async def on_message(message):
             if not success:
                 logging.error(f"❌ Failed to post webhook message to [{target_lang.upper()}]")
             
-            # Brief pause to stagger webhooks and prevent rate-limiting across routes
+            # Stagger dispatching across channels to avoid burst limits
             await asyncio.sleep(0.15)
 
 if __name__ == "__main__":
-    client.run(TOKEN)
+    while True:
+        try:
+            client.run(TOKEN)
+            break
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                logging.warning("⚠️ Discord API global IP rate limit hit on startup. Sleeping 30s before retrying connection...")
+                time.sleep(30)
+            else:
+                raise e
+        except Exception as e:
+            logging.error(f"Fatal client error: {e}")
+            time.sleep(10)
