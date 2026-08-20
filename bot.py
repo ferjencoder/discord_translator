@@ -57,7 +57,6 @@ CHANNEL_MAP = {
     1536510464144441515: {"lang": "sv", "webhook": os.getenv("WEBHOOK_SV")},
     1536508684081827880: {"lang": "de", "webhook": os.getenv("WEBHOOK_DE")},
     1536508734530920570: {"lang": "ceb", "webhook": os.getenv("WEBHOOK_CEB")},
-    # Ensure these 3 IDs are replaced with your real channel IDs:
     1538166128017412096: {"lang": "ru", "webhook": os.getenv("WEBHOOK_RU")},
     1538166161873567794: {"lang": "ar", "webhook": os.getenv("WEBHOOK_AR")},
     1538637390149587025: {"lang": "no", "webhook": os.getenv("WEBHOOK_NO")}
@@ -146,7 +145,9 @@ async def on_message(message):
 
     source_channel_id = message.channel.id
 
+    # DIAGNOSTIC CHECK 1: Channel ID matching
     if source_channel_id not in CHANNEL_MAP:
+        logging.info(f"⚠️ Ignored message from channel '{message.channel.name}' (ID: {source_channel_id}). Not found in CHANNEL_MAP!")
         return
 
     source_lang = CHANNEL_MAP[source_channel_id]["lang"]
@@ -158,7 +159,7 @@ async def on_message(message):
     if not text_to_translate.strip() and not has_attachments:
         return
 
-    logging.info(f"Received message in [{source_lang.upper()}]: '{text_to_translate}'")
+    logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}'")
 
     for target_id, config in CHANNEL_MAP.items():
         if target_id == source_channel_id:
@@ -167,8 +168,9 @@ async def on_message(message):
         target_lang = config["lang"]
         webhook_url = config["webhook"]
 
+        # DIAGNOSTIC CHECK 2: Webhook URL verification
         if not webhook_url:
-            logging.warning(f"Webhook URL missing for language [{target_lang.upper()}]")
+            logging.warning(f"❌ Cannot send to [{target_lang.upper()}]: WEBHOOK URL IS MISSING OR NULL!")
             continue
 
         if text_to_translate.strip():
@@ -188,7 +190,9 @@ async def on_message(message):
                 "username": f"{message.author.display_name} ({source_lang.upper()})",
                 "avatar_url": str(message.author.display_avatar.url)
             }
-            await post_webhook_with_retry(webhook_url, payload)
+            success = await post_webhook_with_retry(webhook_url, payload)
+            if not success:
+                logging.error(f"❌ Failed to post webhook message to [{target_lang.upper()}]")
 
 if __name__ == "__main__":
     client.run(TOKEN)
