@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
 from flask import Flask
 
-# Configure logging
+# Configure logging to keep console output clean
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # Load environment variables
@@ -42,8 +42,7 @@ async def keep_alive_ping():
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                async with session.get(render_url) as resp:
-                    logging.info(f"Keep-alive self-ping status: {resp.status}")
+                await session.get(render_url)
             except Exception as e:
                 logging.warning(f"Keep-alive self-ping failed: {e}")
             await asyncio.sleep(600)  # Ping every 10 minutes
@@ -94,8 +93,8 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
             translated = await asyncio.to_thread(_sync_translate)
             break
         except Exception as e:
-            logging.warning(f"Translation error ({target_lang}) [Attempt {attempt}/{max_retries}]: {e}")
             if attempt == max_retries:
+                logging.warning(f"Translation failed for [{target_lang}] after max retries: {e}")
                 return f"[Translation temporarily unavailable]\n> {text}"
             await asyncio.sleep(delay)
             delay *= 2
@@ -120,7 +119,7 @@ async def post_webhook_with_retry(http_session, webhook_url, payload, max_retrie
                     except Exception:
                         retry_after = 2.0
                     
-                    logging.warning(f"Webhook rate limited. Respecting Discord cooldown: {retry_after}s...")
+                    logging.warning(f"Webhook rate limited. Waiting {retry_after}s...")
                     await asyncio.sleep(retry_after)
                     continue
                 else:
@@ -163,21 +162,13 @@ def build_bot_client():
         source_lang = CHANNEL_MAP[source_channel_id]["lang"]
         text_to_translate = message.content
 
-        # 1. Collect standard file attachments
         attachment_urls = [att.url for att in message.attachments]
-
-        # 2. Collect sticker CDN URLs
         sticker_urls = [sticker.url for sticker in message.stickers]
-
-        # Combine all media URLs
         media_urls = attachment_urls + sticker_urls
         has_media = len(media_urls) > 0
 
-        # Ignore if there's no text AND no media (stickers/attachments)
         if not text_to_translate.strip() and not has_media:
             return
-
-        logging.info(f"📥 Received message in [{source_lang.upper()}] ({message.channel.name}): '{text_to_translate}' (Media: {len(media_urls)})")
 
         session = await get_http_session()
 
@@ -198,7 +189,6 @@ def build_bot_client():
                 else:
                     translated_text = ""
 
-                # Append attachment and sticker URLs to the message text
                 if has_media:
                     media_str = "\n".join(media_urls)
                     translated_text = f"{translated_text}\n{media_str}".strip()
@@ -212,16 +202,14 @@ def build_bot_client():
                         "avatar_url": str(message.author.display_avatar.url)
                     }
                     success = await post_webhook_with_retry(session, webhook_url, payload)
-                    if success:
-                        logging.info(f"✅ Dispatched translation to [{target_lang.upper()}]")
-                    else:
+                    if not success:
                         logging.error(f"❌ Webhook post failed for [{target_lang.upper()}]")
                     
                     await asyncio.sleep(0.15)
 
             except Exception as e:
                 logging.error(f"💥 Exception caught while dispatching to [{target_lang.upper()}]: {e}")
-                
+
     return client
 
 if __name__ == "__main__":
