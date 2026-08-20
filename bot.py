@@ -162,13 +162,18 @@ def build_bot_client():
         source_lang = CHANNEL_MAP[source_channel_id]["lang"]
         text_to_translate = message.content
 
-        # Collect all media assets: standard files, stickers, and embedded GIF/media links
+        # Standard file attachments and external GIF embeds
         attachment_urls = [att.url for att in message.attachments]
-        sticker_urls = [sticker.url for sticker in message.stickers]
         embed_urls = [e.url for e in message.embeds if e.url and e.type in ('gifv', 'image', 'video')]
+        
+        # Format sticker URLs to force PNG format (handles Lottie/JSON stickers)
+        sticker_embeds = []
+        for sticker in message.stickers:
+            png_url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
+            sticker_embeds.append({"image": {"url": png_url}})
 
-        media_urls = attachment_urls + sticker_urls + embed_urls
-        has_media = len(media_urls) > 0
+        media_urls = attachment_urls + embed_urls
+        has_media = len(media_urls) > 0 or len(sticker_embeds) > 0
 
         if not text_to_translate.strip() and not has_media:
             return
@@ -192,18 +197,23 @@ def build_bot_client():
                 else:
                     translated_text = ""
 
-                if has_media:
+                if media_urls:
                     media_str = "\n".join(media_urls)
                     translated_text = f"{translated_text}\n{media_str}".strip()
 
-                chunks = chunk_text(translated_text)
+                chunks = chunk_text(translated_text) if translated_text else [""]
 
-                for chunk in chunks:
+                for idx, chunk in enumerate(chunks):
                     payload = {
                         "content": chunk,
                         "username": f"{message.author.display_name} ({source_lang.upper()})",
                         "avatar_url": str(message.author.display_avatar.url)
                     }
+                    
+                    # Attach sticker image embeds to the final text chunk
+                    if idx == len(chunks) - 1 and sticker_embeds:
+                        payload["embeds"] = sticker_embeds
+
                     success = await post_webhook_with_retry(session, webhook_url, payload)
                     if not success:
                         logging.error(f"❌ Webhook post failed for [{target_lang.upper()}]")
