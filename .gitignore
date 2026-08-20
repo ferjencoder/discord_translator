@@ -1,3 +1,26 @@
+# Environment & Secrets
 .env
+*.env
+
+# IDE / Editor Settings
+.vscode/
+.idea/
+
+# Exported Diagnostic & Data Files
+*.csv
+
+# Python Cache & Compiled Files
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+.venv/
+env/
+venv/
+ENV/
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
