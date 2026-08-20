@@ -117,25 +117,26 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
 
     return translated
 
-async def post_webhook_with_retry(webhook_url, payload, max_retries=3):
-    delay = 1.0
+async def post_webhook_with_retry(webhook_url, payload, max_retries=5):
+    """Posts payload to Discord Webhook with smart rate-limit backing off."""
     for attempt in range(1, max_retries + 1):
         try:
             async with http_session.post(webhook_url, json=payload) as resp:
                 if resp.status in (200, 204):
                     return True
                 elif resp.status == 429:
-                    retry_after = (await resp.json()).get("retry_after", delay)
-                    logging.warning(f"Webhook rate limited. Waiting {retry_after}s...")
+                    data = await resp.json()
+                    # Respect Discord's exact retry_after duration
+                    retry_after = data.get("retry_after", 1.5)
+                    logging.warning(f"Webhook rate limited. Respecting Discord cooldown: {retry_after}s...")
                     await asyncio.sleep(retry_after)
+                    continue
                 else:
                     logging.warning(f"Webhook Error ({resp.status}) [Attempt {attempt}/{max_retries}]")
         except Exception as e:
             logging.warning(f"Webhook POST failed [Attempt {attempt}/{max_retries}]: {e}")
 
-        if attempt < max_retries:
-            await asyncio.sleep(delay)
-            delay *= 2
+        await asyncio.sleep(1.0)
     return False
 
 @client.event
@@ -145,9 +146,7 @@ async def on_message(message):
 
     source_channel_id = message.channel.id
 
-    # DIAGNOSTIC CHECK 1: Channel ID matching
     if source_channel_id not in CHANNEL_MAP:
-        logging.info(f"⚠️ Ignored message from channel '{message.channel.name}' (ID: {source_channel_id}). Not found in CHANNEL_MAP!")
         return
 
     source_lang = CHANNEL_MAP[source_channel_id]["lang"]
@@ -168,7 +167,6 @@ async def on_message(message):
         target_lang = config["lang"]
         webhook_url = config["webhook"]
 
-        # DIAGNOSTIC CHECK 2: Webhook URL verification
         if not webhook_url:
             logging.warning(f"❌ Cannot send to [{target_lang.upper()}]: WEBHOOK URL IS MISSING OR NULL!")
             continue
@@ -193,6 +191,9 @@ async def on_message(message):
             success = await post_webhook_with_retry(webhook_url, payload)
             if not success:
                 logging.error(f"❌ Failed to post webhook message to [{target_lang.upper()}]")
+            
+            # Brief pause to stagger webhooks and prevent rate-limiting across routes
+            await asyncio.sleep(0.15)
 
 if __name__ == "__main__":
     client.run(TOKEN)
