@@ -92,11 +92,19 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
     for attempt in range(1, max_retries + 1):
         try:
             translated = await asyncio.to_thread(_sync_translate)
+
+            # Reject raw Google HTML server error pages (Error 500/429)
+            if translated and ("Error 500" in translated or "<!DOCTYPE html>" in translated or "That’s an error" in translated):
+                logging.warning(f"Google Translator returned HTML Error page on attempt {attempt}")
+                translated = None
+                raise ValueError("Received HTML error from translator endpoint")
+
             break
         except Exception as e:
             if attempt == max_retries:
                 logging.warning(f"Translation failed for [{target_lang}] after max retries: {e}")
-                return f"[Translation temporarily unavailable]\n> {text}"
+                # Fall back directly to original text rather than posting raw HTML errors
+                return text
             await asyncio.sleep(delay)
             delay *= 2
 
@@ -241,6 +249,9 @@ def build_bot_client():
                 if not webhook_url:
                     logging.warning(f"⚠️ Skipped [{target_lang.upper()}]: WEBHOOK URL IS MISSING IN ENV VARS!")
                     continue
+
+                # Add 200ms delay between target language requests to prevent Google IP rate limits
+                await asyncio.sleep(0.2)
 
                 if text_to_translate.strip():
                     translated_text = await translate_text_with_retry(text_to_translate, target_lang)
