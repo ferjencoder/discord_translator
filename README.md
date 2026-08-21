@@ -7,15 +7,15 @@ A 10-channel Discord translation bridge for OZY. Messages posted in one configur
 | Language | Code | Channel | Role | Webhook env |
 |---|---|---|---|---|
 | English | `en` | `#english` | `EN` | `WEBHOOK_EN` |
-| Spanish | `es` | `#espanol` | `ES` | `WEBHOOK_ES` |
-| French | `fr` | `#french` | `FR` | `WEBHOOK_FR` |
-| Portuguese | `pt` | `#portuguese` | `PT` | `WEBHOOK_PT` |
-| Swedish | `sv` | `#swedish` | `SE` | `WEBHOOK_SV` |
+| Spanish | `es` | `#español` | `ES` | `WEBHOOK_ES` |
+| French | `fr` | `#français` | `FR` | `WEBHOOK_FR` |
+| Portuguese | `pt` | `#português` | `PT` | `WEBHOOK_PT` |
+| Swedish | `sv` | `#svenska` | `SE` | `WEBHOOK_SV` |
 | German | `de` | `#deutsch` | `DE` | `WEBHOOK_DE` |
 | Bisaya / Cebuano | `ceb` | `#bisaya` | `PH` | `WEBHOOK_CEB` |
-| Russian | `ru` | `#russian` | `RU` | `WEBHOOK_RU` |
-| Arabic | `ar` | `#arab` | `AR` | `WEBHOOK_AR` |
-| Norwegian | `no` | `#norwegian` | `NO` | `WEBHOOK_NO` |
+| Russian | `ru` | `#русский` | `RU` | `WEBHOOK_RU` |
+| Arabic | `ar` | `#العربية` | `AR` | `WEBHOOK_AR` |
+| Norwegian | `no` | `#norsk` | `NO` | `WEBHOOK_NO` |
 
 The configured Discord IDs remain in `settings.py`. The bot refuses to start if a webhook points to the wrong channel or guild.
 
@@ -283,7 +283,7 @@ REACTION_CHANNEL_IDS=234567890123456789,345678901234567890
 
 Both lists may be used together. If both are blank, reaction translation is disabled.
 
-Dedicated `#english`, `#espanol`, etc. channels are explicitly excluded from reaction mode and continue using automatic 9-language fan-out.
+Dedicated `#english`, `#español`, etc. channels are explicitly excluded from reaction mode and continue using automatic 9-language fan-out.
 
 ## Anti-spam / anti-clog controls
 
