@@ -1,26 +1,13 @@
-# Environment & Secrets
 .env
 *.env
-
-# IDE / Editor Settings
-.vscode/
-.idea/
-
-# Exported Diagnostic & Data Files
-*.csv
-
-# Python Cache & Compiled Files
+!.env.example
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# Virtual Environments
+*.py[cod]
+.pytest_cache/
 .venv/
-env/
 venv/
-ENV/
-
-# OS Generated Files
+data/*.sqlite3
+data/*.sqlite3-shm
+data/*.sqlite3-wal
+channel_permissions_export_*.csv
 .DS_Store
-Thumbs.db

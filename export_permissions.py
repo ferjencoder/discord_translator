@@ -1,57 +1,108 @@
-import os
+from __future__ import annotations
+
+import asyncio
 import csv
+from datetime import datetime
+from pathlib import Path
+
 import discord
-from dotenv import load_dotenv
 
-load_dotenv()
+from settings import ConfigError, load_identity
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-SERVER_ID = os.getenv("SERVER_ID")
 
-if not TOKEN or not SERVER_ID:
-    print("❌ Error: DISCORD_TOKEN or SERVER_ID is missing from your .env file.")
-    exit(1)
+class ExportClient(discord.Client):
+    def __init__(self, *, server_id: int, output: Path) -> None:
+        super().__init__(intents=discord.Intents.default())
+        self.server_id = server_id
+        self.output = output
+        self._ran = False
+        self.failure: BaseException | None = None
 
-intents = discord.Intents.default()
-intents.guilds = True
+    async def on_ready(self) -> None:
+        if self._ran:
+            return
+        self._ran = True
+        try:
+            await self._export()
+        except Exception as exc:
+            self.failure = exc
+            print(f"ERROR: {exc}")
+        finally:
+            await self.close()
 
-client = discord.Client(intents=intents)
+    async def _export(self) -> None:
+        guild = self.get_guild(self.server_id)
+        if guild is None:
+            raise RuntimeError(f"Expected guild {self.server_id} was not found")
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}. Fetching channel permissions...")
-    guild = client.get_guild(int(SERVER_ID))
+        with self.output.open("w", newline="", encoding="utf-8-sig") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "Guild",
+                    "Guild ID",
+                    "Category",
+                    "Category ID",
+                    "Channel Name",
+                    "Channel ID",
+                    "Target",
+                    "Target ID",
+                    "Type",
+                    "Allowed Permissions",
+                    "Denied Permissions",
+                ]
+            )
 
-    if not guild:
-        print("❌ Server not found! Double check your SERVER_ID in .env.")
-        await client.close()
-        return
+            for channel in guild.channels:
+                category_name = channel.category.name if channel.category else "No Category"
+                category_id = channel.category.id if channel.category else ""
+                for target, overwrite in channel.overwrites.items():
+                    target_name = getattr(target, "name", str(target))
+                    target_type = "Role" if isinstance(target, discord.Role) else "Member"
+                    allowed = [perm for perm, value in overwrite if value is True]
+                    denied = [perm for perm, value in overwrite if value is False]
+                    writer.writerow(
+                        [
+                            guild.name,
+                            guild.id,
+                            category_name,
+                            category_id,
+                            channel.name,
+                            channel.id,
+                            target_name,
+                            target.id,
+                            target_type,
+                            ", ".join(allowed) if allowed else "None",
+                            ", ".join(denied) if denied else "None",
+                        ]
+                    )
 
-    with open("channel_permissions_export.csv", mode="w", newline="", encoding="utf-8") as file:
-        writer = csv.writer(file)
-        writer.writerow(["Category", "Channel Name", "Target (Role/Member)", "Type", "Allowed Permissions", "Denied Permissions"])
+        print(f"Permission export saved to {self.output}")
 
-        for channel in guild.channels:
-            category_name = channel.category.name if channel.category else "No Category"
-            
-            for target, overwrite in channel.overwrites.items():
-                target_name = target.name if hasattr(target, 'name') else str(target)
-                target_type = "Role" if isinstance(target, discord.Role) else "Member"
 
-                allowed = [perm for perm, val in overwrite if val is True]
-                denied = [perm for perm, val in overwrite if val is False]
+def main() -> None:
+    try:
+        token, server_id = load_identity()
+    except ConfigError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
 
-                writer.writerow([
-                    category_name,
-                    channel.name,
-                    target_name,
-                    target_type,
-                    ", ".join(allowed) if allowed else "None",
-                    ", ".join(denied) if denied else "None"
-                ])
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output = Path(f"channel_permissions_export_{timestamp}.csv")
+    async def runner() -> None:
+        client = ExportClient(server_id=server_id, output=output)
+        try:
+            await client.start(token)
+        finally:
+            if not client.is_closed():
+                await client.close()
+        if client.failure:
+            raise RuntimeError(str(client.failure)) from client.failure
 
-    print("✅ Export complete! Saved to 'channel_permissions_export.csv'")
-    await client.close()
+    try:
+        asyncio.run(runner())
+    except RuntimeError as exc:
+        raise SystemExit(f"Permission export failed: {exc}") from exc
+
 
 if __name__ == "__main__":
-    client.run(TOKEN)
+    main()

@@ -1,84 +1,157 @@
-import os
+from __future__ import annotations
+
+import asyncio
+import argparse
+
 import discord
-from dotenv import load_dotenv
 
-load_dotenv()
+from settings import (
+    CATEGORY_NAME,
+    CHANNEL_SPECS,
+    TRANSLATOR_ROLE_NAME,
+    ConfigError,
+    load_identity,
+)
 
-TOKEN = os.getenv("DISCORD_TOKEN")
-SERVER_ID = os.getenv("SERVER_ID")
+CONFIRM_PHRASE = "OZY_FIX_TRANSLATION_PERMISSIONS"
 
-CATEGORY_NAME = "💬 OZY Chats"
+MESSAGE_PERMISSIONS = {
+    "view_channel": True,
+    "send_messages": True,
+    "read_message_history": True,
+    "embed_links": True,
+    "attach_files": True,
+    "add_reactions": True,
+    "use_external_emojis": True,
+    "send_messages_in_threads": True,
+}
 
-if not TOKEN or not SERVER_ID:
-    print("❌ Error: DISCORD_TOKEN or SERVER_ID is missing from your .env file.")
-    exit(1)
 
-intents = discord.Intents.default()
-intents.guilds = True
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Safely repair OZY translation channel permissions.")
+    parser.add_argument("--apply", action="store_true", help="Apply changes. Default is dry-run.")
+    parser.add_argument("--confirm", default="", help=f"Required with --apply: {CONFIRM_PHRASE}")
+    return parser.parse_args()
 
-client = discord.Client(intents=intents)
 
-@client.event
-async def on_ready():
-    print(f"Logged in as {client.user}. Searching for category '{CATEGORY_NAME}'...")
-    guild = client.get_guild(int(SERVER_ID))
+def changes_for(overwrite: discord.PermissionOverwrite, desired: dict[str, bool]) -> list[str]:
+    changes = []
+    for name, value in desired.items():
+        current = getattr(overwrite, name)
+        if current is not value:
+            changes.append(f"{name}: {current} -> {value}")
+    return changes
 
-    if not guild:
-        print("❌ Server not found! Double check your SERVER_ID in .env.")
-        await client.close()
-        return
 
-    # Find the target category
-    category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
-    if not category:
-        print(f"❌ Category '{CATEGORY_NAME}' not found in the server.")
-        await client.close()
-        return
+class PermissionClient(discord.Client):
+    def __init__(self, *, server_id: int, args: argparse.Namespace) -> None:
+        super().__init__(intents=discord.Intents.default())
+        self.server_id = server_id
+        self.args = args
+        self._ran = False
+        self.failure: BaseException | None = None
 
-    print(f"Found category '{category.name}'. Updating channel overwrites...\n")
+    async def on_ready(self) -> None:
+        if self._ran:
+            return
+        self._ran = True
+        try:
+            await self._run_fix()
+        except Exception as exc:
+            self.failure = exc
+            print(f"ERROR: {exc}")
+        finally:
+            await self.close()
 
-    # Define standard messaging permissions for regular language roles & bot
-    permissions_to_enable = {
-        "read_messages": True,
-        "send_messages": True,
-        "read_message_history": True,
-        "embed_links": True,
-        "attach_files": True,
-        "add_reactions": True,
-        "use_external_emojis": True,
-        "send_messages_in_threads": True,
-    }
+    async def _run_fix(self) -> None:
+        guild = self.get_guild(self.server_id)
+        if guild is None:
+            raise RuntimeError(f"Expected guild {self.server_id} was not found")
 
-    for channel in category.text_channels:
-        print(f"⚙️ Updating #{channel.name}...")
+        if self.args.apply and self.args.confirm != CONFIRM_PHRASE:
+            raise RuntimeError(f"Refusing changes. With --apply pass --confirm {CONFIRM_PHRASE}")
 
-        # 1. Block @everyone from reading/writing in language channels by default
-        # (This ensures users only see channels matching their assigned role)
-        everyone_role = guild.default_role
-        await channel.set_permissions(
-            everyone_role,
-            read_messages=False,
-            send_messages=False,
-            reason="Bulk permission update script"
-        )
+        category = discord.utils.get(guild.categories, name=CATEGORY_NAME)
+        if category is None:
+            raise RuntimeError(f"Category guard failed: {CATEGORY_NAME!r} not found")
 
-        # 2. Update all existing role/member overwrites in this channel
-        for target, overwrite in channel.overwrites.items():
-            if target == everyone_role:
-                continue
+        translator_role = discord.utils.get(guild.roles, name=TRANSLATOR_ROLE_NAME)
+        if translator_role is None:
+            raise RuntimeError(f"Role guard failed: {TRANSLATOR_ROLE_NAME!r} not found")
 
-            # Apply the permissions dictionary
-            overwrite.update(**permissions_to_enable)
-            await channel.set_permissions(
-                target,
-                overwrite=overwrite,
-                reason="Bulk permission update script for translation bot"
+        print(f"Guild guard: {guild.name} ({guild.id})")
+        print(f"Category guard: {category.name} ({category.id})")
+        print("Mode:", "APPLY" if self.args.apply else "DRY RUN")
+
+        for spec in CHANNEL_SPECS:
+            channel = guild.get_channel(spec.channel_id)
+            if not isinstance(channel, discord.TextChannel):
+                raise RuntimeError(f"Channel {spec.lang} ID {spec.channel_id} not found")
+            if channel.category_id != category.id:
+                raise RuntimeError(f"#{channel.name} is not inside {CATEGORY_NAME!r}")
+            if channel.name != spec.channel_name:
+                raise RuntimeError(
+                    f"Channel-name guard failed for {spec.lang}: expected #{spec.channel_name}, got #{channel.name}"
+                )
+
+            language_role = discord.utils.get(guild.roles, name=spec.role_name)
+            if language_role is None:
+                raise RuntimeError(f"Role guard failed for {spec.lang}: role {spec.role_name!r} not found")
+
+            targets = (
+                (guild.default_role, {"view_channel": False, "send_messages": False}),
+                (translator_role, MESSAGE_PERMISSIONS),
+                (language_role, MESSAGE_PERMISSIONS),
             )
-            target_name = getattr(target, "name", str(target))
-            print(f"   └─ Granted full messaging permissions to: {target_name}")
 
-    print("\n✅ All channel permissions in '💬 OZY Chats' have been updated successfully!")
-    await client.close()
+            print(f"\n#{channel.name} ({channel.id})")
+            for target, desired in targets:
+                overwrite = channel.overwrites_for(target)
+                changes = changes_for(overwrite, desired)
+                if not changes:
+                    print(f"  {target.name}: already correct")
+                    continue
+                print(f"  {target.name}:")
+                for change in changes:
+                    print(f"    {change}")
+
+                if self.args.apply:
+                    overwrite.update(**desired)
+                    await channel.set_permissions(
+                        target,
+                        overwrite=overwrite,
+                        reason="OZY translator guarded permission repair",
+                    )
+
+            # Important: unrelated member/role overwrites are intentionally untouched.
+
+        if not self.args.apply:
+            print(f"\nDry run only. To execute: add --apply --confirm {CONFIRM_PHRASE}")
+        else:
+            print("\nPermission repair complete. Unrelated overwrites were preserved.")
+
+
+def main() -> None:
+    args = parse_args()
+    try:
+        token, server_id = load_identity()
+    except ConfigError as exc:
+        raise SystemExit(f"Configuration error: {exc}") from exc
+    async def runner() -> None:
+        client = PermissionClient(server_id=server_id, args=args)
+        try:
+            await client.start(token)
+        finally:
+            if not client.is_closed():
+                await client.close()
+        if client.failure:
+            raise RuntimeError(str(client.failure)) from client.failure
+
+    try:
+        asyncio.run(runner())
+    except RuntimeError as exc:
+        raise SystemExit(f"Permission repair failed: {exc}") from exc
+
 
 if __name__ == "__main__":
-    client.run(TOKEN)
+    main()
