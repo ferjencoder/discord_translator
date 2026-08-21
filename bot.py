@@ -166,11 +166,17 @@ def build_bot_client():
         attachment_urls = [att.url for att in message.attachments]
         embed_urls = [e.url for e in message.embeds if e.url and e.type in ('gifv', 'image', 'video')]
         
-        # Format sticker URLs to force PNG format (handles Lottie/JSON stickers)
+        # Format stickers by type so Lottie animated stickers render via Discord's media proxy
         sticker_embeds = []
         for sticker in message.stickers:
-            png_url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
-            sticker_embeds.append({"image": {"url": png_url}})
+            if sticker.format == discord.StickerFormatType.lottie:
+                sticker_url = f"https://media.discordapp.net/stickers/{sticker.id}.gif"
+            elif sticker.format == discord.StickerFormatType.apng:
+                sticker_url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
+            else:
+                sticker_url = sticker.url
+
+            sticker_embeds.append({"image": {"url": sticker_url}})
 
         media_urls = attachment_urls + embed_urls
         has_media = len(media_urls) > 0 or len(sticker_embeds) > 0
@@ -210,7 +216,7 @@ def build_bot_client():
                         "avatar_url": str(message.author.display_avatar.url)
                     }
                     
-                    # Attach sticker image embeds to the final text chunk
+                    # Attach sticker embeds to the payload
                     if idx == len(chunks) - 1 and sticker_embeds:
                         payload["embeds"] = sticker_embeds
 
