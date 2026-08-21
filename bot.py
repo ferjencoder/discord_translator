@@ -115,32 +115,32 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
     return translated or text
 
 async def fetch_sticker_as_static_png(session, sticker):
-    """Downloads a static PNG representation for standard, APNG, or Lottie stickers."""
-    # Use native sticker url if available or build CDN query endpoint
-    url = getattr(sticker, 'url', None)
+    """Downloads static image representation for standard, APNG, or Lottie stickers."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    urls_to_try = []
     
-    # Override for Lottie vector stickers or missing URLs to fetch static raster preview
-    if not url or getattr(sticker, 'format', None) == discord.StickerFormatType.lottie:
-        url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png?size=160"
+    # Try direct sticker URL if available
+    if hasattr(sticker, 'url') and sticker.url:
+        urls_to_try.append(sticker.url)
+
+    # Standard CDN PNG fallback endpoint
+    urls_to_try.append(f"https://cdn.discordapp.com/stickers/{sticker.id}.png?size=160")
 
     filename = f"sticker_{sticker.id}.png"
 
-    try:
-        async with session.get(url) as resp:
-            if resp.status == 200:
-                data = await resp.read()
-                return filename, data
-            else:
-                # Secondary fallback if direct URL failed
-                fallback_url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png?size=160"
-                if url != fallback_url:
-                    async with session.get(fallback_url) as fallback_resp:
-                        if fallback_resp.status == 200:
-                            data = await fallback_resp.read()
-                            return filename, data
-                logging.warning(f"Sticker CDN returned status {resp.status} for sticker {sticker.id}")
-    except Exception as e:
-        logging.warning(f"Failed to fetch static PNG for sticker {sticker.id}: {e}")
+    for url in urls_to_try:
+        try:
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    if data and len(data) > 0:
+                        return filename, data
+        except Exception as e:
+            logging.warning(f"Failed attempt fetching sticker {sticker.id} from {url}: {e}")
+
     return None, None
 
 async def post_webhook_payload(session, webhook_url, content, username, avatar_url, file_data_list=None, max_retries=5):
@@ -229,9 +229,16 @@ def build_bot_client():
             reply_author = message.reference.cached_message.author.display_name
             text_to_translate = f"*(Replying to {reply_author})*\n{text_to_translate}"
 
-        # Standard file attachments and external GIF embeds
+        # Standard file attachments and external GIF embeds (Deduplicated)
         attachment_urls = [att.url for att in message.attachments]
         embed_urls = [e.url for e in message.embeds if e.url and e.type in ('gifv', 'image', 'video')]
+
+        # Combine and deduplicate URLs while preserving insertion order
+        raw_media_urls = attachment_urls + embed_urls
+        media_urls = list(dict.fromkeys(raw_media_urls))
+
+        # Omit media URLs that are already present in the translated text body
+        media_urls = [url for url in media_urls if url not in text_to_translate]
 
         session = await get_http_session()
 
@@ -245,7 +252,6 @@ def build_bot_client():
             else:
                 failed_sticker_names.append(f"[{sticker.name}]")
 
-        media_urls = attachment_urls + embed_urls
         has_media = len(media_urls) > 0 or len(sticker_files) > 0 or len(failed_sticker_names) > 0
 
         if not text_to_translate.strip() and not has_media:
