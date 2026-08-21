@@ -115,8 +115,14 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
     return translated or text
 
 async def fetch_sticker_as_static_png(session, sticker):
-    """Downloads a static PNG representation of any sticker format."""
-    url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
+    """Downloads a static PNG representation for standard, APNG, or Lottie stickers."""
+    # Use native sticker url if available or build CDN query endpoint
+    url = getattr(sticker, 'url', None)
+    
+    # Override for Lottie vector stickers or missing URLs to fetch static raster preview
+    if not url or getattr(sticker, 'format', None) == discord.StickerFormatType.lottie:
+        url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png?size=160"
+
     filename = f"sticker_{sticker.id}.png"
 
     try:
@@ -125,6 +131,13 @@ async def fetch_sticker_as_static_png(session, sticker):
                 data = await resp.read()
                 return filename, data
             else:
+                # Secondary fallback if direct URL failed
+                fallback_url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png?size=160"
+                if url != fallback_url:
+                    async with session.get(fallback_url) as fallback_resp:
+                        if fallback_resp.status == 200:
+                            data = await fallback_resp.read()
+                            return filename, data
                 logging.warning(f"Sticker CDN returned status {resp.status} for sticker {sticker.id}")
     except Exception as e:
         logging.warning(f"Failed to fetch static PNG for sticker {sticker.id}: {e}")
