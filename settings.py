@@ -26,15 +26,15 @@ class ChannelSpec:
 
 CHANNEL_SPECS: tuple[ChannelSpec, ...] = (
     ChannelSpec("en", "English",    1536508569338253332, "english",    "EN", "WEBHOOK_EN"),
-    ChannelSpec("es", "Spanish",    1536508632785748108, "espanol",    "ES", "WEBHOOK_ES"),
-    ChannelSpec("fr", "French",     1536525721584017548, "french",     "FR", "WEBHOOK_FR"),
-    ChannelSpec("pt", "Portuguese", 1536510376617967616, "portuguese", "PT", "WEBHOOK_PT"),
-    ChannelSpec("sv", "Swedish",    1536510464144441515, "swedish",    "SE", "WEBHOOK_SV"),
+    ChannelSpec("es", "Spanish",    1536508632785748108, "español",    "ES", "WEBHOOK_ES"),
+    ChannelSpec("fr", "French",     1536525721584017548, "français",   "FR", "WEBHOOK_FR"),
+    ChannelSpec("pt", "Portuguese", 1536510376617967616, "português",  "PT", "WEBHOOK_PT"),
+    ChannelSpec("sv", "Swedish",    1536510464144441515, "svenska",    "SE", "WEBHOOK_SV"),
     ChannelSpec("de", "German",     1536508684081827880, "deutsch",    "DE", "WEBHOOK_DE"),
     ChannelSpec("ceb", "Bisaya",    1536508734530920570, "bisaya",     "PH", "WEBHOOK_CEB"),
-    ChannelSpec("ru", "Russian",    1538166128017412096, "russian",    "RU", "WEBHOOK_RU"),
-    ChannelSpec("ar", "Arabic",     1538166161873567794, "arab",       "AR", "WEBHOOK_AR"),
-    ChannelSpec("no", "Norwegian",  1538637390149587025, "norwegian",  "NO", "WEBHOOK_NO"),
+    ChannelSpec("ru", "Russian",    1538166128017412096, "русский",    "RU", "WEBHOOK_RU"),
+    ChannelSpec("ar", "Arabic",     1538166161873567794, "العربية",    "AR", "WEBHOOK_AR"),
+    ChannelSpec("no", "Norwegian",  1538637390149587025, "norsk",      "NO", "WEBHOOK_NO"),
 )
 
 CHANNELS_BY_ID = {spec.channel_id: spec for spec in CHANNEL_SPECS}
