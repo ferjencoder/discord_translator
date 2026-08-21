@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import io
 import asyncio
 import threading
 import logging
@@ -105,25 +106,73 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
 
     return translated or text
 
-async def post_webhook_with_retry(http_session, webhook_url, payload, max_retries=5):
-    """Posts payload to Discord Webhook with smart rate-limit backing off."""
+async def fetch_sticker_bytes(session, sticker):
+    """Downloads sticker content in memory as standard image bytes."""
+    # Custom / Standard APNG or PNG
+    if sticker.format in (discord.StickerFormatType.png, discord.StickerFormatType.apng):
+        url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
+        filename = f"sticker_{sticker.id}.png"
+    # Lottie vector animations proxy
+    elif sticker.format == discord.StickerFormatType.lottie:
+        url = f"https://media.discordapp.net/stickers/{sticker.id}.gif"
+        filename = f"sticker_{sticker.id}.gif"
+    else:
+        url = sticker.url
+        filename = f"sticker_{sticker.id}.png"
+
+    try:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                data = await resp.read()
+                return filename, data
+    except Exception as e:
+        logging.warning(f"Failed to fetch sticker {sticker.id}: {e}")
+    return None, None
+
+async def post_webhook_payload(session, webhook_url, content, username, avatar_url, file_data_list=None, max_retries=5):
+    """Posts payload with optional multipart binary file attachments to Discord Webhook."""
     for attempt in range(1, max_retries + 1):
         try:
-            async with http_session.post(webhook_url, json=payload) as resp:
-                if resp.status in (200, 204):
-                    return True
-                elif resp.status == 429:
-                    try:
+            if file_data_list:
+                # Use MultipartFormData for direct file uploads
+                form = aiohttp.FormData()
+                payload_json = {
+                    "content": content,
+                    "username": username,
+                    "avatar_url": avatar_url
+                }
+                form.add_field("payload_json", discord.utils._to_json(payload_json))
+
+                for idx, (filename, b_data) in enumerate(file_data_list):
+                    form.add_field(
+                        f"file{idx}",
+                        io.BytesIO(b_data),
+                        filename=filename,
+                        content_type="application/octet-stream"
+                    )
+
+                async with session.post(webhook_url, data=form) as resp:
+                    if resp.status in (200, 204):
+                        return True
+                    elif resp.status == 429:
                         data = await resp.json()
                         retry_after = float(data.get("retry_after", 1.5))
-                    except Exception:
-                        retry_after = 2.0
-                    
-                    logging.warning(f"Webhook rate limited. Waiting {retry_after}s...")
-                    await asyncio.sleep(retry_after)
-                    continue
-                else:
-                    logging.warning(f"Webhook Error ({resp.status}) [Attempt {attempt}/{max_retries}]")
+                        await asyncio.sleep(retry_after)
+                        continue
+            else:
+                payload = {
+                    "content": content,
+                    "username": username,
+                    "avatar_url": avatar_url
+                }
+                async with session.post(webhook_url, json=payload) as resp:
+                    if resp.status in (200, 204):
+                        return True
+                    elif resp.status == 429:
+                        data = await resp.json()
+                        retry_after = float(data.get("retry_after", 1.5))
+                        await asyncio.sleep(retry_after)
+                        continue
         except Exception as e:
             logging.warning(f"Webhook POST failed [Attempt {attempt}/{max_retries}]: {e}")
 
@@ -162,7 +211,7 @@ def build_bot_client():
         source_lang = CHANNEL_MAP[source_channel_id]["lang"]
         text_to_translate = message.content
 
-        # Handle Reply Reference Context
+        # Handle Reply Context
         if message.reference and message.reference.cached_message:
             reply_author = message.reference.cached_message.author.display_name
             text_to_translate = f"*(Replying to {reply_author})*\n{text_to_translate}"
@@ -170,31 +219,21 @@ def build_bot_client():
         # Standard file attachments and external GIF embeds
         attachment_urls = [att.url for att in message.attachments]
         embed_urls = [e.url for e in message.embeds if e.url and e.type in ('gifv', 'image', 'video')]
-        
-        # Process stickers: create image embeds and text fallbacks
-        sticker_embeds = []
-        sticker_names = []
+
+        session = await get_http_session()
+
+        # Download sticker bytes directly so Discord receives valid image files
+        sticker_files = []
         for sticker in message.stickers:
-            sticker_names.append(f"[{sticker.name}]")
-            if sticker.format == discord.StickerFormatType.lottie:
-                sticker_url = f"https://media.discordapp.net/stickers/{sticker.id}.gif"
-            elif sticker.format == discord.StickerFormatType.apng:
-                sticker_url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
-            else:
-                sticker_url = sticker.url
-
-            sticker_embeds.append({"image": {"url": sticker_url}})
-
-        # Cap sticker embeds to Discord's 10-embed webhook limit
-        sticker_embeds = sticker_embeds[:10]
+            filename, data = await fetch_sticker_bytes(session, sticker)
+            if filename and data:
+                sticker_files.append((filename, data))
 
         media_urls = attachment_urls + embed_urls
-        has_media = len(media_urls) > 0 or len(sticker_embeds) > 0
+        has_media = len(media_urls) > 0 or len(sticker_files) > 0
 
         if not text_to_translate.strip() and not has_media:
             return
-
-        session = await get_http_session()
 
         for target_id, config in CHANNEL_MAP.items():
             if target_id == source_channel_id:
@@ -213,29 +252,27 @@ def build_bot_client():
                 else:
                     translated_text = ""
 
-                # Include sticker text names as a fallback indicator
-                if sticker_names and not sticker_embeds:
-                    translated_text = f"{translated_text}\n{' '.join(sticker_names)}".strip()
-
-                # Combine media links into final text before chunking to prevent length overruns
                 if media_urls:
                     media_str = "\n".join(media_urls)
                     translated_text = f"{translated_text}\n{media_str}".strip()
 
                 chunks = chunk_text(translated_text) if translated_text else [""]
+                username = f"{message.author.display_name} ({source_lang.upper()})"
+                avatar_url = str(message.author.display_avatar.url)
 
                 for idx, chunk in enumerate(chunks):
-                    payload = {
-                        "content": chunk,
-                        "username": f"{message.author.display_name} ({source_lang.upper()})",
-                        "avatar_url": str(message.author.display_avatar.url)
-                    }
-                    
-                    # Attach sticker embeds only on the final chunk
-                    if idx == len(chunks) - 1 and sticker_embeds:
-                        payload["embeds"] = sticker_embeds
+                    # Attach sticker files on the final chunk
+                    files_to_send = sticker_files if idx == len(chunks) - 1 else None
 
-                    success = await post_webhook_with_retry(session, webhook_url, payload)
+                    success = await post_webhook_payload(
+                        session=session,
+                        webhook_url=webhook_url,
+                        content=chunk,
+                        username=username,
+                        avatar_url=avatar_url,
+                        file_data_list=files_to_send
+                    )
+
                     if not success:
                         logging.error(f"❌ Webhook post failed for [{target_lang.upper()}]")
                     
