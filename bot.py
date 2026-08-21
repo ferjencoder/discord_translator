@@ -106,27 +106,20 @@ async def translate_text_with_retry(text, target_lang, max_retries=3):
 
     return translated or text
 
-async def fetch_sticker_bytes(session, sticker):
-    """Downloads sticker content in memory as standard image bytes."""
-    # Custom / Standard APNG or PNG
-    if sticker.format in (discord.StickerFormatType.png, discord.StickerFormatType.apng):
-        url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
-        filename = f"sticker_{sticker.id}.png"
-    # Lottie vector animations proxy
-    elif sticker.format == discord.StickerFormatType.lottie:
-        url = f"https://media.discordapp.net/stickers/{sticker.id}.gif"
-        filename = f"sticker_{sticker.id}.gif"
-    else:
-        url = sticker.url
-        filename = f"sticker_{sticker.id}.png"
+async def fetch_sticker_as_static_png(session, sticker):
+    """Downloads a static PNG representation of any sticker format."""
+    url = f"https://cdn.discordapp.com/stickers/{sticker.id}.png"
+    filename = f"sticker_{sticker.id}.png"
 
     try:
         async with session.get(url) as resp:
             if resp.status == 200:
                 data = await resp.read()
                 return filename, data
+            else:
+                logging.warning(f"Sticker CDN returned status {resp.status} for sticker {sticker.id}")
     except Exception as e:
-        logging.warning(f"Failed to fetch sticker {sticker.id}: {e}")
+        logging.warning(f"Failed to fetch static PNG for sticker {sticker.id}: {e}")
     return None, None
 
 async def post_webhook_payload(session, webhook_url, content, username, avatar_url, file_data_list=None, max_retries=5):
@@ -134,7 +127,6 @@ async def post_webhook_payload(session, webhook_url, content, username, avatar_u
     for attempt in range(1, max_retries + 1):
         try:
             if file_data_list:
-                # Use MultipartFormData for direct file uploads
                 form = aiohttp.FormData()
                 payload_json = {
                     "content": content,
@@ -148,7 +140,7 @@ async def post_webhook_payload(session, webhook_url, content, username, avatar_u
                         f"file{idx}",
                         io.BytesIO(b_data),
                         filename=filename,
-                        content_type="application/octet-stream"
+                        content_type="image/png"
                     )
 
                 async with session.post(webhook_url, data=form) as resp:
@@ -222,15 +214,18 @@ def build_bot_client():
 
         session = await get_http_session()
 
-        # Download sticker bytes directly so Discord receives valid image files
+        # Download stickers as static PNG image bytes
         sticker_files = []
+        failed_sticker_names = []
         for sticker in message.stickers:
-            filename, data = await fetch_sticker_bytes(session, sticker)
+            filename, data = await fetch_sticker_as_static_png(session, sticker)
             if filename and data:
                 sticker_files.append((filename, data))
+            else:
+                failed_sticker_names.append(f"[{sticker.name}]")
 
         media_urls = attachment_urls + embed_urls
-        has_media = len(media_urls) > 0 or len(sticker_files) > 0
+        has_media = len(media_urls) > 0 or len(sticker_files) > 0 or len(failed_sticker_names) > 0
 
         if not text_to_translate.strip() and not has_media:
             return
@@ -252,6 +247,10 @@ def build_bot_client():
                 else:
                     translated_text = ""
 
+                # Append text labels if any sticker failed to convert to PNG
+                if failed_sticker_names:
+                    translated_text = f"{translated_text}\n{' '.join(failed_sticker_names)}".strip()
+
                 if media_urls:
                     media_str = "\n".join(media_urls)
                     translated_text = f"{translated_text}\n{media_str}".strip()
@@ -261,7 +260,7 @@ def build_bot_client():
                 avatar_url = str(message.author.display_avatar.url)
 
                 for idx, chunk in enumerate(chunks):
-                    # Attach sticker files on the final chunk
+                    # Attach static sticker image files on the final chunk
                     files_to_send = sticker_files if idx == len(chunks) - 1 else None
 
                     success = await post_webhook_payload(
