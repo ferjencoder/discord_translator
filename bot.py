@@ -162,13 +162,20 @@ def build_bot_client():
         source_lang = CHANNEL_MAP[source_channel_id]["lang"]
         text_to_translate = message.content
 
+        # Handle Reply Reference Context
+        if message.reference and message.reference.cached_message:
+            reply_author = message.reference.cached_message.author.display_name
+            text_to_translate = f"*(Replying to {reply_author})*\n{text_to_translate}"
+
         # Standard file attachments and external GIF embeds
         attachment_urls = [att.url for att in message.attachments]
         embed_urls = [e.url for e in message.embeds if e.url and e.type in ('gifv', 'image', 'video')]
         
-        # Format stickers by type so Lottie animated stickers render via Discord's media proxy
+        # Process stickers: create image embeds and text fallbacks
         sticker_embeds = []
+        sticker_names = []
         for sticker in message.stickers:
+            sticker_names.append(f"[{sticker.name}]")
             if sticker.format == discord.StickerFormatType.lottie:
                 sticker_url = f"https://media.discordapp.net/stickers/{sticker.id}.gif"
             elif sticker.format == discord.StickerFormatType.apng:
@@ -177,6 +184,9 @@ def build_bot_client():
                 sticker_url = sticker.url
 
             sticker_embeds.append({"image": {"url": sticker_url}})
+
+        # Cap sticker embeds to Discord's 10-embed webhook limit
+        sticker_embeds = sticker_embeds[:10]
 
         media_urls = attachment_urls + embed_urls
         has_media = len(media_urls) > 0 or len(sticker_embeds) > 0
@@ -203,6 +213,11 @@ def build_bot_client():
                 else:
                     translated_text = ""
 
+                # Include sticker text names as a fallback indicator
+                if sticker_names and not sticker_embeds:
+                    translated_text = f"{translated_text}\n{' '.join(sticker_names)}".strip()
+
+                # Combine media links into final text before chunking to prevent length overruns
                 if media_urls:
                     media_str = "\n".join(media_urls)
                     translated_text = f"{translated_text}\n{media_str}".strip()
@@ -216,7 +231,7 @@ def build_bot_client():
                         "avatar_url": str(message.author.display_avatar.url)
                     }
                     
-                    # Attach sticker embeds to the payload
+                    # Attach sticker embeds only on the final chunk
                     if idx == len(chunks) - 1 and sticker_embeds:
                         payload["embeds"] = sticker_embeds
 
