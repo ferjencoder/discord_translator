@@ -56,6 +56,17 @@ class TranslatorBot(discord.Client):
         super().__init__(intents=intents, allowed_mentions=discord.AllowedMentions.none())
 
         self.settings = settings
+        self.tree = discord.app_commands.CommandTree(self)
+        self._status_guild = discord.Object(id=settings.server_id)
+
+        @self.tree.command(
+            name="translator-status",
+            description="Show OZY Translator provider health and usage",
+            guild=self._status_guild,
+        )
+        async def translator_status(interaction: discord.Interaction) -> None:
+            await self._translator_status_command(interaction)
+
         self.channels_by_id = settings.channels_by_id
         self.state = MessageState(settings.state_db)
         self.translator = TranslationService(
@@ -66,6 +77,14 @@ class TranslatorBot(discord.Client):
             read_timeout_seconds=settings.translation_read_timeout_seconds,
             task_timeout_seconds=settings.translation_task_timeout_seconds,
             cooldown_429_seconds=settings.translation_429_cooldown_seconds,
+        )
+        log.info(
+            "Translation config concurrency=%d start_interval=%.2fs retries=%d 429_cooldown=%.1fs failure_mode=%s",
+            settings.translation_concurrency,
+            settings.translation_start_interval_seconds,
+            settings.translation_retries,
+            settings.translation_429_cooldown_seconds,
+            settings.translation_failure_mode,
         )
 
         self.http_session: aiohttp.ClientSession | None = None
@@ -87,6 +106,18 @@ class TranslatorBot(discord.Client):
         removed = await self.state.cleanup(self.settings.state_retention_days)
         if removed:
             log.info("Removed %d expired translation mapping rows", removed)
+        metrics_removed = await self.state.cleanup_translation_metrics(
+            self.settings.translation_metrics_retention_days
+        )
+        if metrics_removed:
+            log.info("Removed %d expired translation metric rows", metrics_removed)
+
+        try:
+            synced = await self.tree.sync(guild=self._status_guild)
+            log.info("Synced %d guild application command(s)", len(synced))
+        except Exception as exc:
+            # Status telemetry is ancillary; command-sync trouble must not take translation offline.
+            log.error("Could not sync /translator-status command: %s", exc)
 
         await self._start_health_server()
         await self._validate_and_load_webhooks()
@@ -95,6 +126,144 @@ class TranslatorBot(discord.Client):
 
         if self.settings.self_ping_enabled and self.settings.render_external_url:
             self.self_ping_task = asyncio.create_task(self._self_ping_loop(), name="render-self-ping")
+
+    def _can_view_translator_status(self, interaction: discord.Interaction) -> bool:
+        member = interaction.user
+        if not isinstance(member, discord.Member):
+            return False
+        perms = member.guild_permissions
+        if perms.administrator or perms.manage_guild:
+            return True
+        allowed = {name.casefold() for name in self.settings.translator_status_role_names}
+        return any(role.name.casefold() in allowed for role in member.roles)
+
+    async def _translator_status_command(self, interaction: discord.Interaction) -> None:
+        if interaction.guild_id != self.settings.server_id or not self._can_view_translator_status(interaction):
+            await interaction.response.send_message(
+                "This command is restricted to OZY Leadership/admins.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        last_24h, last_30d = await asyncio.gather(
+            self.state.translation_metrics_summary(24),
+            self.state.translation_metrics_summary(24 * 30),
+        )
+
+        success_rate = (last_24h.succeeded / last_24h.requests * 100.0) if last_24h.requests else 100.0
+        if last_24h.requests == 0:
+            health_label = "No traffic yet"
+            color = 0x64748B
+        elif success_rate >= 99.5:
+            health_label = "Healthy"
+            color = 0x10B981
+        elif success_rate >= 98.0:
+            health_label = "Degraded"
+            color = 0xF59E0B
+        else:
+            health_label = "Unhealthy"
+            color = 0xEF4444
+
+        runtime = self.translator.runtime_status()
+        cooldown = float(runtime["cooldown_remaining_seconds"])
+        cooldown_text = f"ACTIVE - {cooldown:.0f}s remaining" if cooldown > 0.5 else "clear"
+
+        projected_chars = last_24h.source_chars * 30
+        free_chars = self.settings.google_cloud_free_chars_monthly
+        usd_per_million = self.settings.google_cloud_usd_per_million_chars
+        projected_billable = max(0, projected_chars - free_chars)
+        projected_cost = projected_billable / 1_000_000 * usd_per_million
+
+        embed = discord.Embed(
+            title="OZY Translator Status",
+            description=f"**{health_label}** - Google web translator (unofficial endpoint)",
+            color=color,
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.add_field(
+            name="Provider now",
+            value=(
+                f"Cooldown: **{cooldown_text}**\n"
+                f"Automatic queue: **{self.event_queue.qsize()}**\n"
+                f"Reaction queue: **{self.reaction_queue.qsize()}**\n"
+                f"Throttle: **{self.settings.translation_concurrency}** concurrent, "
+                f"**{self.settings.translation_start_interval_seconds:.2f}s** spacing"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Last 24 hours",
+            value=(
+                f"Source messages: **{last_24h.source_messages:,}**\n"
+                f"Translation requests: **{last_24h.requests:,}** "
+                f"({last_24h.automatic_requests:,} automatic / {last_24h.reaction_requests:,} reaction)\n"
+                f"Success: **{last_24h.succeeded:,}** | Failed: **{last_24h.failed:,}** "
+                f"| Rate: **{success_rate:.2f}%**\n"
+                f"429 attempts: **{last_24h.rate_limits:,}** | Timeout attempts: **{last_24h.timeouts:,}**\n"
+                f"Avg translation latency: **{last_24h.avg_duration_ms / 1000:.2f}s** | "
+                f"Total attempts: **{last_24h.attempts:,}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Usage / Cloud estimate",
+            value=(
+                f"Request characters, last 30d: **{last_30d.source_chars:,}**\n"
+                f"24h pace projected to 30d: **{projected_chars:,} chars**\n"
+                f"Configured Cloud allowance: **{free_chars:,} chars/month**\n"
+                f"Estimated cost at that pace: **${projected_cost:,.2f}/month** "
+                f"at ${usd_per_million:g}/1M chars"
+            ),
+            inline=False,
+        )
+        if last_24h.top_errors:
+            embed.add_field(
+                name="Failed request errors",
+                value="\n".join(f"`{name}`: **{count}**" for name, count in last_24h.top_errors),
+                inline=False,
+            )
+        embed.set_footer(
+            text=(
+                f"Metrics retained {self.settings.translation_metrics_retention_days} days. "
+                "Character cost is an estimate and pricing is configurable."
+            )
+        )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    async def _translate_tracked(
+        self,
+        *,
+        source_message_id: int,
+        kind: str,
+        text: str,
+        source_lang: str,
+        target_lang: str,
+    ) -> TranslationResult:
+        started = time.perf_counter()
+        result = await self.translator.translate(text, source_lang, target_lang)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        try:
+            await self.state.record_translation_metric(
+                source_message_id=source_message_id,
+                kind=kind,
+                source_lang=source_lang,
+                target_lang=target_lang,
+                source_chars=len(text),
+                ok=result.ok,
+                attempts=result.attempts,
+                final_error=result.error,
+                rate_limit_count=result.rate_limit_errors,
+                timeout_count=result.timeout_errors,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            # Telemetry must never break message translation.
+            log.exception(
+                "Failed recording translation metric source=%s %s->%s",
+                source_message_id, source_lang, target_lang,
+            )
+        return result
 
     async def close(self) -> None:
         tasks = (self.worker_task, self.reaction_worker_task, self.self_ping_task)
@@ -121,6 +290,9 @@ class TranslatorBot(discord.Client):
                 "queue_depth": self.event_queue.qsize(),
                 "reaction_queue_depth": self.reaction_queue.qsize(),
                 "reaction_translation_enabled": bool(self.settings.reaction_channel_ids or self.settings.reaction_category_ids),
+                "translation_cooldown_seconds": round(
+                    float(self.translator.runtime_status()["cooldown_remaining_seconds"]), 1
+                ),
                 "utc": datetime.now(timezone.utc).isoformat(),
             }
             return web.json_response(payload)
@@ -487,9 +659,27 @@ class TranslatorBot(discord.Client):
 
         await self._create_reaction_translation(message, event.target_lang)
 
-    async def _build_reaction_contents(self, message: discord.Message, target_lang: str) -> list[str]:
+    async def _build_reaction_contents(self, message: discord.Message, target_lang: str) -> list[str] | None:
         label = label_for_language(target_lang)
-        result = await self.translator.translate(message.content, "auto", target_lang)
+        result = await self._translate_tracked(
+            source_message_id=message.id,
+            kind="reaction",
+            text=message.content,
+            source_lang="auto",
+            target_lang=target_lang,
+        )
+        if not result.ok:
+            # A reaction explicitly asks for a translation. Posting the untranslated
+            # original under a target-language heading would be misleading, so keep
+            # the failure in logs and let the member retry later.
+            log.warning(
+                "Reaction translation unavailable source=%s target=%s error=%s",
+                message.id,
+                target_lang.upper(),
+                result.error,
+            )
+            return None
+
         flag = canonical_flag(target_lang)
         header = f"{flag} **{label}**"
         chunks = chunk_text(result.text.strip(), max_length=1800) or [result.text.strip()]
@@ -500,6 +690,8 @@ class TranslatorBot(discord.Client):
 
     async def _create_reaction_translation(self, message: discord.Message, target_lang: str) -> None:
         contents = await self._build_reaction_contents(message, target_lang)
+        if contents is None:
+            return
         sent: list[discord.Message] = []
 
         try:
@@ -550,6 +742,10 @@ class TranslatorBot(discord.Client):
             return
 
         contents = await self._build_reaction_contents(message, target_lang)
+        if contents is None:
+            # Keep the last successful translation in place on transient provider
+            # failure instead of replacing it with an error or deleting it.
+            return
         kept_ids: list[int] = []
         common = min(len(rows), len(contents))
 
@@ -707,6 +903,31 @@ class TranslatorBot(discord.Client):
         fallback_urls = list(dict.fromkeys(fallback_urls))
         return blobs, fallback_urls
 
+    def _translation_output(
+        self,
+        result: TranslationResult,
+        source_lang: str,
+        target_lang: str,
+    ) -> str | None:
+        if result.ok:
+            return result.text
+
+        mode = self.settings.translation_failure_mode
+        log.warning(
+            "Translation unavailable %s->%s error=%s mode=%s",
+            source_lang.upper(),
+            target_lang.upper(),
+            result.error,
+            mode,
+        )
+        if mode == "skip":
+            return None
+        if mode == "marked":
+            return f"[Translation unavailable {source_lang.upper()} -> {target_lang.upper()}]\n{result.text}"
+        # Default: forward the original message without the noisy failure banner.
+        # The webhook username already includes the source channel language, e.g. (EN).
+        return result.text
+
     async def _translate_and_dispatch(self, message: discord.Message, *, edited: bool) -> None:
         source_runtime = self.channels_by_id[message.channel.id]
         source_lang = source_runtime.spec.lang
@@ -728,7 +949,13 @@ class TranslatorBot(discord.Client):
 
         async def translate_target(target: RuntimeChannel) -> tuple[RuntimeChannel, TranslationResult]:
             if text.strip():
-                result = await self.translator.translate(text, source_lang, target.spec.lang)
+                result = await self._translate_tracked(
+                    source_message_id=message.id,
+                    kind="automatic",
+                    text=text,
+                    source_lang=source_lang,
+                    target_lang=target.spec.lang,
+                )
             else:
                 result = TranslationResult(text="", ok=True, attempts=0)
             return target, result
@@ -740,22 +967,27 @@ class TranslatorBot(discord.Client):
             username = username[:79].rstrip() + "…"
         avatar_url = str(message.author.display_avatar.url)
 
-        # Send all destination copies concurrently. Each source event waits for these
-        # deliveries to finish before the next event, preserving global conversation order.
-        await asyncio.gather(
-            *(
+        # Send destination copies concurrently after translation work is complete.
+        # Translation provider traffic itself is controlled by TranslationService.
+        deliveries = []
+        for target, result in translated:
+            output = self._translation_output(result, source_lang, target.spec.lang)
+            if output is None:
+                continue
+            deliveries.append(
                 self._send_translation(
                     source_message_id=message.id,
                     target=target,
-                    translated=result.text,
+                    translated=output,
                     media_blobs=media_blobs,
                     media_fallbacks=media_fallbacks,
                     username=username,
                     avatar_url=avatar_url,
                 )
-                for target, result in translated
             )
-        )
+
+        if deliveries:
+            await asyncio.gather(*deliveries)
 
     async def _send_translation(
         self,

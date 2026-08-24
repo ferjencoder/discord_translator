@@ -86,6 +86,15 @@ def _env_float(name: str, default: float, minimum: float | None = None) -> float
     return value
 
 
+def _env_choice(name: str, default: str, allowed: set[str]) -> str:
+    raw = os.getenv(name)
+    value = default if raw is None else raw.strip().lower()
+    if value not in allowed:
+        choices = ", ".join(sorted(allowed))
+        raise ConfigError(f"{name} must be one of: {choices}")
+    return value
+
+
 def _env_id_set(name: str) -> frozenset[int]:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -103,6 +112,11 @@ def _env_id_set(name: str) -> frozenset[int]:
             raise ConfigError(f"{name} IDs must be positive")
         values.add(value)
     return frozenset(values)
+
+
+def _env_name_set(name: str, default: str = "") -> frozenset[str]:
+    raw = os.getenv(name, default).strip()
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
 def validate_webhook_url(value: str, env_name: str) -> str:
@@ -151,6 +165,11 @@ class Settings:
     translation_read_timeout_seconds: float
     translation_task_timeout_seconds: float
     translation_429_cooldown_seconds: float
+    translation_failure_mode: str
+    translation_metrics_retention_days: int
+    translator_status_role_names: frozenset[str]
+    google_cloud_free_chars_monthly: int
+    google_cloud_usd_per_million_chars: float
     webhook_retries: int
     max_reupload_bytes: int
     max_total_reupload_bytes: int
@@ -202,13 +221,27 @@ def load_settings() -> Settings:
         self_ping_enabled=_env_bool("SELF_PING_ENABLED", self_ping_default),
         self_ping_interval_seconds=_env_int("SELF_PING_INTERVAL_SECONDS", 600, 60),
         event_queue_size=_env_int("EVENT_QUEUE_SIZE", 500, 10),
-        translation_concurrency=_env_int("TRANSLATION_CONCURRENCY", 3, 1),
-        translation_start_interval_seconds=_env_float("TRANSLATION_START_INTERVAL_SECONDS", 0.20, 0.0),
+        # The translator fans one source message out to nine destinations. The old
+        # concurrency=3 / 200ms defaults created burst traffic against an unofficial
+        # Google endpoint. Safer defaults deliberately favor reliability over speed.
+        translation_concurrency=_env_int("TRANSLATION_CONCURRENCY", 1, 1),
+        translation_start_interval_seconds=_env_float("TRANSLATION_START_INTERVAL_SECONDS", 0.75, 0.0),
         translation_retries=_env_int("TRANSLATION_RETRIES", 3, 1),
         translation_connect_timeout_seconds=_env_float("TRANSLATION_CONNECT_TIMEOUT_SECONDS", 5.0, 0.1),
         translation_read_timeout_seconds=_env_float("TRANSLATION_READ_TIMEOUT_SECONDS", 15.0, 0.1),
         translation_task_timeout_seconds=_env_float("TRANSLATION_TASK_TIMEOUT_SECONDS", 25.0, 1.0),
-        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 20.0, 1.0),
+        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 60.0, 1.0),
+        translation_failure_mode=_env_choice(
+            "TRANSLATION_FAILURE_MODE",
+            "original",
+            {"original", "skip", "marked"},
+        ),
+        translation_metrics_retention_days=_env_int("TRANSLATION_METRICS_RETENTION_DAYS", 90, 1),
+        translator_status_role_names=_env_name_set("TRANSLATOR_STATUS_ROLE_NAMES", "Leader,Superior,Superiors"),
+        google_cloud_free_chars_monthly=_env_int("GOOGLE_CLOUD_FREE_CHARS_MONTHLY", 500000, 0),
+        google_cloud_usd_per_million_chars=_env_float(
+            "GOOGLE_CLOUD_USD_PER_MILLION_CHARS", 20.0, 0.0
+        ),
         webhook_retries=_env_int("WEBHOOK_RETRIES", 3, 1),
         max_reupload_bytes=_env_int("MAX_REUPLOAD_BYTES", 8 * 1024 * 1024, 0),
         max_total_reupload_bytes=_env_int("MAX_TOTAL_REUPLOAD_BYTES", 20 * 1024 * 1024, 0),

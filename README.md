@@ -35,15 +35,27 @@ The configured Discord IDs remain in `settings.py`. The bot refuses to start if 
 - Preserves the known source language instead of asking Google to auto-detect every short Discord message.
 - Protects URLs, code blocks, inline code, Discord mentions, channel mentions, timestamps, slash-command mentions, custom emoji, and Total Battle coordinates before translation.
 - Verifies protected placeholders survived translation before restoring them.
-- A failed translation is visibly marked as unavailable instead of silently pretending the untranslated source is a successful translation.
+- A failed automatic translation is logged and, by default, forwards only the original source text without the old noisy failure banner. This behavior is configurable.
 - Adds explicit HTTP connect/read timeouts around the `deep-translator` Google request.
-- Uses a global 200 ms request-start gate and configurable translation semaphore. Requests can overlap, but new Google calls do not all start at once.
-- A detected HTTP 429 activates a global translation cooldown.
+- Uses conservative provider throttling by default: one in-flight translation and a 750 ms minimum gap between Google request starts.
+- Sends browser-like request headers and falls back to a second Google web endpoint when the mobile HTML endpoint fails for a non-429 reason.
+- A detected HTTP 429 activates a 60-second global translation cooldown.
+- Automatic channel failures default to forwarding only the original text (the webhook username still shows the source language) instead of flooding channels with `[Translation unavailable ...]`.
+
+### Translation telemetry and `/translator-status`
+
+- Every logical translation request is recorded in SQLite without storing chat text.
+- Metrics include source/target language, source character count, success/failure, retry count, final error class, 429 attempts, timeout attempts, and end-to-end translation latency.
+- `/translator-status` is a guild-only ephemeral command for server admins/manage-server users or configured leadership roles.
+- Default leadership role names are `Leader`, `Superior`, and `Superiors`; override with `TRANSLATOR_STATUS_ROLE_NAMES`.
+- The command shows current provider cooldown/queue state, 24-hour success rate, 429/timeouts, 30-day character usage, and a projected Google Cloud Translation cost at the current 24-hour traffic pace.
+- Metrics are retained for 90 days by default (`TRANSLATION_METRICS_RETENTION_DAYS`). They use the same SQLite file as message mappings, so persistence still depends on the host filesystem.
+- Cost assumptions are configuration only. Update `GOOGLE_CLOUD_FREE_CHARS_MONTHLY` and `GOOGLE_CLOUD_USD_PER_MILLION_CHARS` if provider pricing changes.
 
 ### Ordering and lifecycle
 
 - Create, edit, and delete events enter one FIFO event queue.
-- The nine destination translations run concurrently for each source message.
+- The nine destination translation jobs are queued together, but provider concurrency/rate gates control how quickly Google is called. The safe default is serialized provider traffic.
 - The next source event is not processed until delivery of the current event finishes, preserving conversation ordering.
 - Edit events remove the old translated copies and post fresh translations marked `[Edited]`.
 - Delete events remove the translated copies.
@@ -134,6 +146,24 @@ Set the secrets/environment variables from `.env.example` in the Render dashboar
 
 `SELF_PING_ENABLED=true` keeps the previous self-ping behavior when `RENDER_EXTERNAL_URL` exists. Set it to `false` if your hosting tier does not need it.
 
+Recommended translation settings for the unofficial Google endpoint:
+
+```env
+TRANSLATION_CONCURRENCY=1
+TRANSLATION_START_INTERVAL_SECONDS=0.75
+TRANSLATION_RETRIES=3
+TRANSLATION_429_COOLDOWN_SECONDS=60
+TRANSLATION_FAILURE_MODE=original
+TRANSLATION_METRICS_RETENTION_DAYS=90
+TRANSLATOR_STATUS_ROLE_NAMES=Leader,Superior,Superiors
+GOOGLE_CLOUD_FREE_CHARS_MONTHLY=500000
+GOOGLE_CLOUD_USD_PER_MILLION_CHARS=20
+```
+
+`TRANSLATION_FAILURE_MODE` supports `original`, `skip`, or `marked`. `original` is the default and avoids the noisy failure banner. Reaction-requested translations are not posted when the provider fails, because labeling untranslated source text as the requested language would be misleading.
+
+After deployment, run `/translator-status` in the OZY server. The reply is ephemeral. Access is allowed to Discord administrators, members with **Manage Server**, and members whose role names match `TRANSLATOR_STATUS_ROLE_NAMES`.
+
 ## Important translation-provider limitation
 
 `deep-translator`'s Google translator uses Google's public/mobile translation endpoint rather than a contracted Google Cloud Translation API. It is free and useful for this private bot, but it has no SLA and can be rate-limited or changed by Google.
@@ -215,7 +245,7 @@ python -m unittest discover -s tests -v
 - `settings.py` - channel map and strict environment validation
 - `translator.py` - Google/deep-translator adapter, timeouts, throttling, retries, cooldown
 - `text_utils.py` - protected-token handling and Discord-safe chunking
-- `state.py` - SQLite automatic + reaction translation message mapping
+- `state.py` - SQLite automatic/reaction message mapping plus translation telemetry
 - `reaction_utils.py` - flag/language aliases and canonical labels
 - `TOPIC_TRANSLATION_SETUP.md` - quick setup for topic/category reaction translation
 - `clear_channels.py` - guarded purge utility

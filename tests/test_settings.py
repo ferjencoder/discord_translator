@@ -27,6 +27,14 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.self_ping_enabled)
         self.assertEqual(settings.reaction_channel_ids, frozenset())
         self.assertEqual(settings.reaction_category_ids, frozenset())
+        self.assertEqual(settings.translation_concurrency, 1)
+        self.assertEqual(settings.translation_start_interval_seconds, 0.75)
+        self.assertEqual(settings.translation_429_cooldown_seconds, 60.0)
+        self.assertEqual(settings.translation_failure_mode, "original")
+        self.assertEqual(settings.translation_metrics_retention_days, 90)
+        self.assertEqual(settings.translator_status_role_names, frozenset({"Leader", "Superior", "Superiors"}))
+        self.assertEqual(settings.google_cloud_free_chars_monthly, 500000)
+        self.assertEqual(settings.google_cloud_usd_per_million_chars, 20.0)
 
     def test_non_discord_webhook_is_rejected(self):
         with self.assertRaises(ConfigError):
@@ -40,6 +48,19 @@ class SettingsTests(unittest.TestCase):
             settings = load_settings()
         self.assertEqual(settings.reaction_channel_ids, frozenset({111, 222}))
         self.assertEqual(settings.reaction_category_ids, frozenset({333, 444}))
+
+
+    def test_translation_failure_mode_validation(self):
+        env = self._env()
+        env["TRANSLATION_FAILURE_MODE"] = "skip"
+        with patch.dict(os.environ, env, clear=True):
+            settings = load_settings()
+        self.assertEqual(settings.translation_failure_mode, "skip")
+
+        env["TRANSLATION_FAILURE_MODE"] = "nope"
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ConfigError):
+                load_settings()
 
     def test_invalid_reaction_id_is_rejected(self):
         env = self._env()

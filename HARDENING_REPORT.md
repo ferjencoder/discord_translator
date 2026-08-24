@@ -10,7 +10,7 @@ Reviewed and rebuilt the translation bot, permission repair utility, channel pur
 - **Permission overwrite escalation:** `fix_permissions.py` no longer modifies arbitrary existing role/member overwrites. It only touches `@everyone`, `OZY Translator`, and the expected language role for each guarded channel.
 - **Destructive purge risk:** `clear_channels.py` is dry-run by default and requires explicit language targets, exact guild/category/channel guards, an apply flag, and a confirmation phrase.
 - **Conversation reordering:** source create/edit/delete events are processed through one FIFO queue. The next source event waits for the current event's destination deliveries to complete.
-- **Silent translation failure:** failed translations are visibly marked and include the original text.
+- **Silent translation failure:** failed translations are logged; automatic fan-out defaults to forwarding the original text without a noisy failure banner, while reaction-requested failures are skipped.
 
 ## Fixed - medium severity
 
@@ -19,7 +19,7 @@ Reviewed and rebuilt the translation bot, permission repair utility, channel pur
 - Added webhook message-ID tracking for delete/edit propagation.
 - Added explicit Google connect/read timeouts around `deep-translator` 1.11.4.
 - Added configurable translation concurrency plus a real HTTP-start rate gate.
-- Added global cooldown after detected Google 429 responses.
+- Added a global cooldown after detected Google 429 responses; the current safe default is 60 seconds.
 - Protected URLs, code, Discord mentions, timestamps, slash commands, custom emoji, broadcast mentions, and Total Battle coordinates from translation.
 - Replaced hard 1900-character slicing with boundary-aware chunking.
 - Re-uploaded normal attachments within configured size limits instead of relying only on source CDN URLs.
@@ -77,9 +77,16 @@ Security/reliability controls added:
 - bot/webhook source messages ignored
 - only known flag reactions invoke the provider
 - reaction replies are silent by default and use `AllowedMentions.none()`
-- reaction translation uses the existing provider semaphore, 200 ms request-start gate, retry policy, timeouts, and global 429 cooldown
+- reaction translation uses the existing provider semaphore, conservative request-start gate, retry policy, timeouts, and global 429 cooldown
 - requested translations update on source edits and are deleted with the source
 - edit refresh uses in-place bot-message edits whenever chunk structure permits
 - reaction state stores message IDs/language metadata, not source or translated chat text
 
 This architecture makes reaction translation lighter than the automatic fan-out path for normal use: a source message creates zero translations until someone explicitly requests one.
+
+
+## Translation telemetry added
+
+The translator now records provider-health metrics to the existing SQLite state database and exposes them through the guild-only ephemeral `/translator-status` command. No source or translated chat text is stored in telemetry. Metrics include character count, request outcome, retries, 429 attempts, timeout attempts and latency. The status command also estimates official Google Cloud Translation monthly usage from the observed 24-hour pace using configurable pricing assumptions.
+
+Telemetry failure is non-blocking: a SQLite metrics-write error is logged but never prevents the Discord translation from being delivered.

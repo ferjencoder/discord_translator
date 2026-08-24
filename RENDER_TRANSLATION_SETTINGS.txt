@@ -1,0 +1,29 @@
+Recommended Render environment values for OZY Translator
+
+TRANSLATION_CONCURRENCY=1
+TRANSLATION_START_INTERVAL_SECONDS=0.75
+TRANSLATION_RETRIES=3
+TRANSLATION_CONNECT_TIMEOUT_SECONDS=5
+TRANSLATION_READ_TIMEOUT_SECONDS=15
+TRANSLATION_TASK_TIMEOUT_SECONDS=25
+TRANSLATION_429_COOLDOWN_SECONDS=60
+TRANSLATION_FAILURE_MODE=original
+
+# /translator-status telemetry
+TRANSLATION_METRICS_RETENTION_DAYS=90
+TRANSLATOR_STATUS_ROLE_NAMES=Leader,Superior,Superiors
+GOOGLE_CLOUD_FREE_CHARS_MONTHLY=500000
+GOOGLE_CLOUD_USD_PER_MILLION_CHARS=20
+
+Failure modes:
+- original: post the original source text without the noisy failure banner
+- skip: do not post a destination copy when translation fails
+- marked: preserve the old [Translation unavailable ...] banner
+
+Status command:
+- /translator-status
+- ephemeral
+- allowed for Administrator / Manage Server / configured leadership role names
+- tracks success rate, 429s, timeouts, character volume, queues, cooldown and estimated Cloud cost
+
+Important: telemetry is stored in STATE_DB. If the Render filesystem is ephemeral, metrics reset when that filesystem is replaced.

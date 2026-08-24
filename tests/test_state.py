@@ -20,6 +20,39 @@ class StateTests(unittest.IsolatedAsyncioTestCase):
             await state.delete_source(100)
             self.assertEqual(await state.get(100), [])
 
+    async def test_translation_metrics_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = MessageState(Path(tmp) / "map.sqlite3")
+            await state.initialize()
+            await state.record_translation_metric(
+                source_message_id=100, kind="automatic", source_lang="en", target_lang="de",
+                source_chars=25, ok=True, attempts=1, final_error=None,
+                rate_limit_count=0, timeout_count=0, duration_ms=850,
+            )
+            await state.record_translation_metric(
+                source_message_id=100, kind="automatic", source_lang="en", target_lang="fr",
+                source_chars=25, ok=False, attempts=3, final_error="TooManyRequests",
+                rate_limit_count=2, timeout_count=0, duration_ms=62000,
+            )
+            await state.record_translation_metric(
+                source_message_id=200, kind="reaction", source_lang="auto", target_lang="es",
+                source_chars=10, ok=True, attempts=2, final_error=None,
+                rate_limit_count=0, timeout_count=1, duration_ms=2400,
+            )
+
+            summary = await state.translation_metrics_summary(24)
+            self.assertEqual(summary.requests, 3)
+            self.assertEqual(summary.succeeded, 2)
+            self.assertEqual(summary.failed, 1)
+            self.assertEqual(summary.source_messages, 2)
+            self.assertEqual(summary.source_chars, 60)
+            self.assertEqual(summary.attempts, 6)
+            self.assertEqual(summary.rate_limits, 2)
+            self.assertEqual(summary.timeouts, 1)
+            self.assertEqual(summary.automatic_requests, 2)
+            self.assertEqual(summary.reaction_requests, 1)
+            self.assertEqual(summary.top_errors, (("TooManyRequests", 1),))
+
     async def test_reaction_mapping_dedup_and_cleanup(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = MessageState(Path(tmp) / "map.sqlite3")
