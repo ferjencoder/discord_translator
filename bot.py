@@ -77,13 +77,15 @@ class TranslatorBot(discord.Client):
             read_timeout_seconds=settings.translation_read_timeout_seconds,
             task_timeout_seconds=settings.translation_task_timeout_seconds,
             cooldown_429_seconds=settings.translation_429_cooldown_seconds,
+            fallback_delay_seconds=settings.translation_fallback_delay_seconds,
         )
         log.info(
-            "Translation config concurrency=%d start_interval=%.2fs retries=%d 429_cooldown=%.1fs failure_mode=%s",
+            "Translation config concurrency=%d start_interval=%.2fs retries=%d 429_cooldown=%.1fs fallback_delay=%.1fs failure_mode=%s",
             settings.translation_concurrency,
             settings.translation_start_interval_seconds,
             settings.translation_retries,
             settings.translation_429_cooldown_seconds,
+            settings.translation_fallback_delay_seconds,
             settings.translation_failure_mode,
         )
 
@@ -188,7 +190,9 @@ class TranslatorBot(discord.Client):
                 f"Automatic queue: **{self.event_queue.qsize()}**\n"
                 f"Reaction queue: **{self.reaction_queue.qsize()}**\n"
                 f"Throttle: **{self.settings.translation_concurrency}** concurrent, "
-                f"**{self.settings.translation_start_interval_seconds:.2f}s** spacing"
+                f"**{self.settings.translation_start_interval_seconds:.2f}s** spacing\n"
+                f"429 cooldown: **{self.settings.translation_429_cooldown_seconds:.0f}s** | "
+                f"Fallback delay: **{self.settings.translation_fallback_delay_seconds:.0f}s**"
             ),
             inline=False,
         )

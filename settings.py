@@ -165,6 +165,7 @@ class Settings:
     translation_read_timeout_seconds: float
     translation_task_timeout_seconds: float
     translation_429_cooldown_seconds: float
+    translation_fallback_delay_seconds: float
     translation_failure_mode: str
     translation_metrics_retention_days: int
     translator_status_role_names: frozenset[str]
@@ -223,14 +224,18 @@ def load_settings() -> Settings:
         event_queue_size=_env_int("EVENT_QUEUE_SIZE", 500, 10),
         # The translator fans one source message out to nine destinations. The old
         # concurrency=3 / 200ms defaults created burst traffic against an unofficial
-        # Google endpoint. Safer defaults deliberately favor reliability over speed.
+        # Google endpoint. These stricter defaults deliberately favor reliability over
+        # speed and defer endpoint fallback instead of doubling a failed request.
         translation_concurrency=_env_int("TRANSLATION_CONCURRENCY", 1, 1),
-        translation_start_interval_seconds=_env_float("TRANSLATION_START_INTERVAL_SECONDS", 0.75, 0.0),
-        translation_retries=_env_int("TRANSLATION_RETRIES", 3, 1),
+        translation_start_interval_seconds=_env_float("TRANSLATION_START_INTERVAL_SECONDS", 1.5, 0.0),
+        translation_retries=_env_int("TRANSLATION_RETRIES", 2, 1),
         translation_connect_timeout_seconds=_env_float("TRANSLATION_CONNECT_TIMEOUT_SECONDS", 5.0, 0.1),
         translation_read_timeout_seconds=_env_float("TRANSLATION_READ_TIMEOUT_SECONDS", 15.0, 0.1),
         translation_task_timeout_seconds=_env_float("TRANSLATION_TASK_TIMEOUT_SECONDS", 25.0, 1.0),
-        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 60.0, 1.0),
+        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 120.0, 1.0),
+        translation_fallback_delay_seconds=_env_float(
+            "TRANSLATION_FALLBACK_DELAY_SECONDS", 10.0, 0.0
+        ),
         translation_failure_mode=_env_choice(
             "TRANSLATION_FAILURE_MODE",
             "original",

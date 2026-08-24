@@ -37,9 +37,9 @@ The configured Discord IDs remain in `settings.py`. The bot refuses to start if 
 - Verifies protected placeholders survived translation before restoring them.
 - A failed automatic translation is logged and, by default, forwards only the original source text without the old noisy failure banner. This behavior is configurable.
 - Adds explicit HTTP connect/read timeouts around the `deep-translator` Google request.
-- Uses conservative provider throttling by default: one in-flight translation and a 750 ms minimum gap between Google request starts.
-- Sends browser-like request headers and falls back to a second Google web endpoint when the mobile HTML endpoint fails for a non-429 reason.
-- A detected HTTP 429 activates a 60-second global translation cooldown.
+- Uses conservative provider throttling by default: one in-flight translation and a 1.5 second minimum gap between Google request starts.
+- Sends browser-like request headers. The second Google web endpoint is now a deferred fallback: it waits 10 seconds by default and then passes through the same request-start gate instead of firing immediately.
+- A detected HTTP 429 activates a 120-second global translation cooldown. All pending destination languages stop starting provider requests until that cooldown clears, and the 429 retry does not also use the normal short exponential backoff.
 - Automatic channel failures default to forwarding only the original text (the webhook username still shows the source language) instead of flooding channels with `[Translation unavailable ...]`.
 
 ### Translation telemetry and `/translator-status`
@@ -55,7 +55,7 @@ The configured Discord IDs remain in `settings.py`. The bot refuses to start if 
 ### Ordering and lifecycle
 
 - Create, edit, and delete events enter one FIFO event queue.
-- The nine destination translation jobs are queued together, but provider concurrency/rate gates control how quickly Google is called. The safe default is serialized provider traffic.
+- The nine destination translation jobs are queued together, but provider concurrency/rate gates control how quickly Google is called. The safe default is serialized provider traffic. If any request receives 429, the same global gate pauses the remaining queued languages before another provider request can start.
 - The next source event is not processed until delivery of the current event finishes, preserving conversation ordering.
 - Edit events remove the old translated copies and post fresh translations marked `[Edited]`.
 - Delete events remove the translated copies.
@@ -150,9 +150,10 @@ Recommended translation settings for the unofficial Google endpoint:
 
 ```env
 TRANSLATION_CONCURRENCY=1
-TRANSLATION_START_INTERVAL_SECONDS=0.75
-TRANSLATION_RETRIES=3
-TRANSLATION_429_COOLDOWN_SECONDS=60
+TRANSLATION_START_INTERVAL_SECONDS=1.5
+TRANSLATION_RETRIES=2
+TRANSLATION_429_COOLDOWN_SECONDS=120
+TRANSLATION_FALLBACK_DELAY_SECONDS=10
 TRANSLATION_FAILURE_MODE=original
 TRANSLATION_METRICS_RETENTION_DAYS=90
 TRANSLATOR_STATUS_ROLE_NAMES=Leader,Superior,Superiors

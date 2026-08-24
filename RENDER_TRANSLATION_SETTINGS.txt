@@ -1,12 +1,13 @@
 Recommended Render environment values for OZY Translator
 
 TRANSLATION_CONCURRENCY=1
-TRANSLATION_START_INTERVAL_SECONDS=0.75
-TRANSLATION_RETRIES=3
+TRANSLATION_START_INTERVAL_SECONDS=1.5
+TRANSLATION_RETRIES=2
 TRANSLATION_CONNECT_TIMEOUT_SECONDS=5
 TRANSLATION_READ_TIMEOUT_SECONDS=15
 TRANSLATION_TASK_TIMEOUT_SECONDS=25
-TRANSLATION_429_COOLDOWN_SECONDS=60
+TRANSLATION_429_COOLDOWN_SECONDS=120
+TRANSLATION_FALLBACK_DELAY_SECONDS=10
 TRANSLATION_FAILURE_MODE=original
 
 # /translator-status telemetry
@@ -27,3 +28,10 @@ Status command:
 - tracks success rate, 429s, timeouts, character volume, queues, cooldown and estimated Cloud cost
 
 Important: telemetry is stored in STATE_DB. If the Render filesystem is ephemeral, metrics reset when that filesystem is replaced.
+
+Rate-limit behavior in this build:
+- every Google HTTP call, including fallback, passes through the same global start gate
+- TranslationNotFound / endpoint-parser failures wait before JSON fallback
+- HTTP 429 pauses all pending destination starts for the full cooldown
+- a 429 retry does not also use the old 1-10 second exponential backoff
+- the endpoint that returned 429 is retried after cooldown; it is not immediately bypassed

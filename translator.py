@@ -23,9 +23,9 @@ class TimeoutGoogleTranslator(GoogleTranslator):
 
     deep-translator 1.11.4 scrapes Google's mobile HTML endpoint and does not pass
     an explicit timeout. That endpoint can also change its HTML or reject datacenter
-    traffic. We keep the library's normal mobile endpoint as the first attempt, add
-    browser-like request headers, then fall back to Google's public JSON web endpoint
-    for non-rate-limit failures.
+    traffic. We keep the library's normal mobile endpoint as the first attempt and
+    expose Google's public JSON web endpoint as a deferred fallback. TranslationService
+    controls when that fallback is allowed so every provider request is rate-gated.
 
     Both endpoints are unofficial/public Google Translate endpoints. This improves
     resilience but does not provide an SLA. HTTP 429 is never bypassed with an extra
@@ -95,21 +95,10 @@ class TimeoutGoogleTranslator(GoogleTranslator):
 
             translated = element.get_text(strip=True)
             if translated == text.strip() and self._same_text(text, translated):
-                # deep-translator historically retries without hl if Google echoes the
-                # source. Do the same, but only once and without mutating shared params.
-                if "hl" in params:
-                    params.pop("hl", None)
-                    retry = self._get(self._base_url, params=params)
-                    try:
-                        self._check_status(retry, "mobile-html")
-                        retry_soup = BeautifulSoup(retry.text, "html.parser")
-                        retry_element = retry_soup.find(self._element_tag, self._element_query)
-                        if not retry_element:
-                            retry_element = retry_soup.find(self._element_tag, self._alt_element_query)
-                        if retry_element:
-                            return retry_element.get_text(strip=True)
-                    finally:
-                        retry.close()
+                # Do not perform deep-translator's historical immediate second request
+                # without `hl`. One logical attempt must equal one provider HTTP call so
+                # the service-level rate gate remains authoritative. Some words/names
+                # legitimately translate to themselves, so returning the echo is safe.
                 return text.strip()
 
             return translated
@@ -148,42 +137,41 @@ class TimeoutGoogleTranslator(GoogleTranslator):
         finally:
             response.close()
 
-    def translate(self, text: str, **kwargs) -> str:
+    def translate_mobile(self, text: str) -> str:
+        """Translate with the mobile HTML endpoint only.
+
+        Provider retries/fallbacks are deliberately orchestrated by TranslationService
+        so every HTTP request passes through the same global spacing/cooldown gate.
+        This prevents one logical translation from silently creating two immediate
+        Google requests.
+        """
         if not is_input_valid(text, max_chars=5000):
             raise TranslationNotFound(text)
 
         text = text.strip()
         if self._same_source_target() or is_empty(text):
             return text
+        return self._translate_mobile(text)
 
-        try:
-            return self._translate_mobile(text)
-        except TooManyRequests:
-            # A second immediate Google request would worsen a real rate limit.
-            raise
-        except (RequestError, TranslationNotFound) as primary_exc:
-            # A connect/read/TLS failure is likely network-wide, so do not immediately
-            # double the traffic against a second Google hostname. The JSON fallback is
-            # for endpoint-specific HTTP/parser failures.
-            if isinstance(primary_exc, RequestError) and isinstance(
-                primary_exc.__cause__, requests.RequestException
-            ):
-                raise
+    def translate_json(self, text: str) -> str:
+        """Translate with the JSON web endpoint only.
 
-            log.warning(
-                "Google mobile translation failed %s->%s (%s); trying JSON fallback",
-                self._source,
-                self._target,
-                type(primary_exc).__name__,
-            )
-            try:
-                return self._translate_json(text)
-            except TooManyRequests:
-                raise
-            except (RequestError, TranslationNotFound) as fallback_exc:
-                # Preserve the fallback exception as the visible cause while retaining
-                # the primary exception context for traceback diagnostics.
-                raise fallback_exc from primary_exc
+        This is a deferred fallback. TranslationService decides when it is safe to use
+        it after a mobile endpoint/parser failure.
+        """
+        if not is_input_valid(text, max_chars=5000):
+            raise TranslationNotFound(text)
+
+        text = text.strip()
+        if self._same_source_target() or is_empty(text):
+            return text
+        return self._translate_json(text)
+
+    def translate(self, text: str, **kwargs) -> str:
+        # Preserve GoogleTranslator-compatible behavior for direct callers while keeping
+        # automatic fallback out of this method. TranslationService uses the explicit
+        # endpoint methods above.
+        return self.translate_mobile(text)
 
 
 @dataclass(frozen=True)
@@ -207,6 +195,7 @@ class TranslationService:
         read_timeout_seconds: float,
         task_timeout_seconds: float,
         cooldown_429_seconds: float,
+        fallback_delay_seconds: float,
     ) -> None:
         self._semaphore = asyncio.Semaphore(concurrency)
         self._start_interval = start_interval_seconds
@@ -215,6 +204,7 @@ class TranslationService:
         self._read_timeout = read_timeout_seconds
         self._task_timeout = task_timeout_seconds
         self._cooldown_429 = cooldown_429_seconds
+        self._fallback_delay = fallback_delay_seconds
 
         self._rate_lock = asyncio.Lock()
         self._next_start = 0.0
@@ -254,10 +244,12 @@ class TranslationService:
                 self._translators[key] = pair
             return pair
 
-    def _translate_sync(self, text: str, source: str, target: str) -> str:
+    def _translate_sync(self, text: str, source: str, target: str, endpoint: str) -> str:
         translator, lock = self._translator_for(source, target)
         with lock:
-            return translator.translate(text)
+            if endpoint == "json":
+                return translator.translate_json(text)
+            return translator.translate_mobile(text)
 
     @staticmethod
     def _is_rate_limit_error(exc: BaseException) -> bool:
@@ -285,6 +277,34 @@ class TranslationService:
             current = current.__cause__
         return False
 
+
+    @staticmethod
+    def _is_translation_not_found(exc: BaseException) -> bool:
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, TranslationNotFound):
+                return True
+            current = current.__cause__
+        return False
+
+    @staticmethod
+    def _is_network_request_error(exc: BaseException) -> bool:
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, requests.RequestException):
+                return True
+            current = current.__cause__
+        return False
+
+    def _should_defer_to_json(self, exc: BaseException) -> bool:
+        if self._is_rate_limit_error(exc) or self._is_network_request_error(exc):
+            return False
+        return self._is_translation_not_found(exc) or isinstance(exc, RequestError)
+
     @staticmethod
     def _describe_error(exc: BaseException | None) -> str:
         if exc is None:
@@ -307,16 +327,23 @@ class TranslationService:
         last_error: BaseException | None = None
         rate_limit_errors = 0
         timeout_errors = 0
+        endpoint = "mobile"
 
         for attempt in range(1, self._retries + 1):
             try:
                 async with self._semaphore:
-                    # Capacity is acquired first, then a provider start slot. With the
-                    # safer defaults this serializes fan-out traffic and avoids bursts
-                    # from one Discord message turning into nine near-simultaneous calls.
+                    # Every provider HTTP call, including JSON fallback, must pass this
+                    # gate. A 429 moves _cooldown_until forward, so all pending target
+                    # languages stop starting new Google requests until the cooldown ends.
                     await self._wait_for_start_slot()
                     translated = await asyncio.wait_for(
-                        asyncio.to_thread(self._translate_sync, protected.text, source, target),
+                        asyncio.to_thread(
+                            self._translate_sync,
+                            protected.text,
+                            source,
+                            target,
+                            endpoint,
+                        ),
                         timeout=self._task_timeout,
                     )
                 if not translated or "<!DOCTYPE html>" in translated or "<html" in translated.lower():
@@ -324,7 +351,10 @@ class TranslationService:
 
                 restored = restore_text(translated, protected.replacements)
                 if attempt > 1:
-                    log.info("Translation %s->%s recovered on attempt %d", source, target, attempt)
+                    log.info(
+                        "Translation %s->%s recovered on attempt %d via %s endpoint",
+                        source, target, attempt, endpoint,
+                    )
                 return TranslationResult(
                     text=restored,
                     ok=True,
@@ -335,24 +365,50 @@ class TranslationService:
 
             except Exception as exc:
                 last_error = exc
-                if self._is_rate_limit_error(exc):
+                rate_limited = self._is_rate_limit_error(exc)
+                if rate_limited:
                     rate_limit_errors += 1
                     await self._activate_429_cooldown()
                 if self._is_timeout_error(exc):
                     timeout_errors += 1
 
-                if attempt < self._retries:
-                    backoff = min(10.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
+                if attempt >= self._retries:
+                    break
+
+                if rate_limited:
+                    # Do not add a contradictory 1-10 second retry timer. The next
+                    # attempt will pass through _wait_for_start_slot(), which waits for
+                    # the full global 429 cooldown. Keep the same endpoint after a 429.
                     log.warning(
-                        "Translation %s->%s failed attempt %d/%d: %s; retrying in %.2fs",
-                        source,
-                        target,
-                        attempt,
-                        self._retries,
-                        self._describe_error(exc),
-                        backoff,
+                        "Translation %s->%s failed attempt %d/%d via %s: %s; "
+                        "retry deferred until global %.0fs cooldown clears",
+                        source, target, attempt, self._retries, endpoint,
+                        self._describe_error(exc), self._cooldown_429,
                     )
-                    await asyncio.sleep(backoff)
+                    continue
+
+                if endpoint == "mobile" and self._should_defer_to_json(exc):
+                    # TranslationNotFound can be Google's challenge/anti-bot HTML rather
+                    # than a genuine language failure. Never hit the JSON endpoint
+                    # immediately. Delay it, then let the normal request-start gate run.
+                    endpoint = "json"
+                    delay = self._fallback_delay
+                    log.warning(
+                        "Google mobile translation failed %s->%s (%s); "
+                        "JSON fallback deferred %.1fs and will be rate-gated",
+                        source, target, type(exc).__name__, delay,
+                    )
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    continue
+
+                backoff = min(10.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
+                log.warning(
+                    "Translation %s->%s failed attempt %d/%d via %s: %s; retrying in %.2fs",
+                    source, target, attempt, self._retries, endpoint,
+                    self._describe_error(exc), backoff,
+                )
+                await asyncio.sleep(backoff)
 
         error_name = type(last_error).__name__ if last_error else "unknown"
         log.error(
@@ -363,8 +419,6 @@ class TranslationService:
             self._describe_error(last_error),
         )
 
-        # Presentation of a failed translation belongs to the Discord layer. Returning
-        # the original text keeps this service neutral and avoids hard-coded channel spam.
         return TranslationResult(
             text=text,
             ok=False,
@@ -380,4 +434,5 @@ class TranslationService:
             "cooldown_remaining_seconds": max(0.0, self._cooldown_until - now),
             "next_start_in_seconds": max(0.0, self._next_start - now),
             "retries": self._retries,
+            "fallback_delay_seconds": self._fallback_delay,
         }

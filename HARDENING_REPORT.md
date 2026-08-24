@@ -19,7 +19,7 @@ Reviewed and rebuilt the translation bot, permission repair utility, channel pur
 - Added webhook message-ID tracking for delete/edit propagation.
 - Added explicit Google connect/read timeouts around `deep-translator` 1.11.4.
 - Added configurable translation concurrency plus a real HTTP-start rate gate.
-- Added a global cooldown after detected Google 429 responses; the current safe default is 60 seconds.
+- Added a global cooldown after detected Google 429 responses; the current safe default is 120 seconds.
 - Protected URLs, code, Discord mentions, timestamps, slash commands, custom emoji, broadcast mentions, and Total Battle coordinates from translation.
 - Replaced hard 1900-character slicing with boundary-aware chunking.
 - Re-uploaded normal attachments within configured size limits instead of relying only on source CDN URLs.
@@ -90,3 +90,20 @@ This architecture makes reaction translation lighter than the automatic fan-out 
 The translator now records provider-health metrics to the existing SQLite state database and exposes them through the guild-only ephemeral `/translator-status` command. No source or translated chat text is stored in telemetry. Metrics include character count, request outcome, retries, 429 attempts, timeout attempts and latency. The status command also estimates official Google Cloud Translation monthly usage from the observed 24-hour pace using configurable pricing assumptions.
 
 Telemetry failure is non-blocking: a SQLite metrics-write error is logged but never prevents the Discord translation from being delivered.
+
+
+## 2026-08-24 rate-limit follow-up
+
+A production Render log confirmed Google `TooManyRequests` after the mobile endpoint returned `TranslationNotFound` and the old code immediately hit the JSON fallback. The provider control flow was tightened:
+
+- default request-start spacing increased from 0.75s to 1.5s
+- default retries reduced from 3 to 2
+- default 429 cooldown increased from 60s to 120s
+- mobile `TranslationNotFound` / endpoint-parser failure no longer triggers an immediate second Google request
+- JSON fallback is deferred by `TRANSLATION_FALLBACK_DELAY_SECONDS` (10s default) and must pass the normal global request-start gate
+- 429 retries no longer sleep for a contradictory 1-10 second exponential delay; they retry only after the global cooldown gate clears
+- the endpoint that returned 429 is retried after cooldown rather than immediately bypassed
+- pending destination translations use the same global gate, so a detected 429 prevents the remaining languages from starting new provider requests during cooldown
+- the mobile endpoint no longer performs deep-translator's hidden immediate second request when Google echoes the source text; one service attempt now maps to one Google HTTP call
+
+Two provider-flow tests were added for deferred fallback and 429 retry behavior.
