@@ -88,6 +88,12 @@ class TranslatorBot(discord.Client):
             settings.translation_fallback_delay_seconds,
             settings.translation_failure_mode,
         )
+        log.info(
+            "Discord delivery config start_interval=%.2fs retries=%d 429_cooldown=%.1fs",
+            settings.webhook_start_interval_seconds,
+            settings.webhook_retries,
+            settings.webhook_429_cooldown_seconds,
+        )
 
         self.http_session: aiohttp.ClientSession | None = None
         self.webhooks: dict[int, discord.Webhook] = {}
@@ -100,6 +106,11 @@ class TranslatorBot(discord.Client):
         self._validated_guild = False
         self._reaction_pending: set[tuple[int, str]] = set()
         self._reaction_user_windows: dict[int, deque[float]] = defaultdict(deque)
+        # Incoming webhooks have distinct per-webhook buckets, but Discord can also
+        # impose a global/IP limit. Serialize starts and share one cooldown so a 429
+        # from one language cannot trigger a retry storm across every destination.
+        self._webhook_gate = asyncio.Lock()
+        self._webhook_next_send_at = 0.0
         self.startup_error: BaseException | None = None
 
     async def setup_hook(self) -> None:
@@ -1059,7 +1070,26 @@ class TranslatorBot(discord.Client):
                 }
                 if files:
                     kwargs["files"] = files
-                return await webhook.send(**kwargs)
+                async with self._webhook_gate:
+                    wait_seconds = self._webhook_next_send_at - time.monotonic()
+                    if wait_seconds > 0:
+                        await asyncio.sleep(wait_seconds)
+                    try:
+                        message = await webhook.send(**kwargs)
+                    except discord.HTTPException as exc:
+                        if exc.status == 429:
+                            retry_after = self._discord_retry_after(exc)
+                            cooldown = max(self.settings.webhook_429_cooldown_seconds, retry_after)
+                            self._webhook_next_send_at = time.monotonic() + cooldown
+                        else:
+                            self._webhook_next_send_at = (
+                                time.monotonic() + self.settings.webhook_start_interval_seconds
+                            )
+                        raise
+                    self._webhook_next_send_at = (
+                        time.monotonic() + self.settings.webhook_start_interval_seconds
+                    )
+                    return message
             except (discord.NotFound, discord.Forbidden) as exc:
                 log.error("Permanent webhook failure for %s: %s", target.spec.lang.upper(), exc)
                 return None
@@ -1071,9 +1101,18 @@ class TranslatorBot(discord.Client):
                 if attempt >= self.settings.webhook_retries:
                     log.error("Webhook retries exhausted for %s: %s", target.spec.lang.upper(), exc)
                     return None
-                delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
+                if exc.status == 429:
+                    delay = max(
+                        self.settings.webhook_429_cooldown_seconds,
+                        self._discord_retry_after(exc),
+                    )
+                else:
+                    delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
                 log.warning("Webhook transient error %s for %s; retrying in %.2fs", exc.status, target.spec.lang.upper(), delay)
-                await asyncio.sleep(delay)
+                # The shared gate owns the global 429 wait. Sleeping here as well
+                # would double the cooldown; non-429 failures still back off locally.
+                if exc.status != 429:
+                    await asyncio.sleep(delay)
             except aiohttp.ClientError as exc:
                 if attempt >= self.settings.webhook_retries:
                     log.error("Webhook network retries exhausted for %s: %s", target.spec.lang.upper(), exc)
@@ -1082,6 +1121,18 @@ class TranslatorBot(discord.Client):
                 await asyncio.sleep(delay)
 
         return None
+
+    @staticmethod
+    def _discord_retry_after(exc: discord.HTTPException) -> float:
+        """Return Discord's requested delay when discord.py exposes it."""
+        value = getattr(exc, "retry_after", None)
+        if value is None:
+            headers = getattr(getattr(exc, "response", None), "headers", {})
+            value = headers.get("Retry-After") if headers else None
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return 0.0
 
     async def _delete_translations(self, source_message_id: int) -> None:
         rows = await self.state.get(source_message_id)

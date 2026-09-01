@@ -172,6 +172,8 @@ class Settings:
     google_cloud_free_chars_monthly: int
     google_cloud_usd_per_million_chars: float
     webhook_retries: int
+    webhook_start_interval_seconds: float
+    webhook_429_cooldown_seconds: float
     max_reupload_bytes: int
     max_total_reupload_bytes: int
     silent_translations: bool
@@ -248,6 +250,8 @@ def load_settings() -> Settings:
             "GOOGLE_CLOUD_USD_PER_MILLION_CHARS", 20.0, 0.0
         ),
         webhook_retries=_env_int("WEBHOOK_RETRIES", 3, 1),
+        webhook_start_interval_seconds=_env_float("WEBHOOK_START_INTERVAL_SECONDS", 0.35, 0.0),
+        webhook_429_cooldown_seconds=_env_float("WEBHOOK_429_COOLDOWN_SECONDS", 60.0, 1.0),
         max_reupload_bytes=_env_int("MAX_REUPLOAD_BYTES", 8 * 1024 * 1024, 0),
         max_total_reupload_bytes=_env_int("MAX_TOTAL_REUPLOAD_BYTES", 20 * 1024 * 1024, 0),
         silent_translations=_env_bool("SILENT_TRANSLATIONS", False),
