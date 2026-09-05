@@ -63,7 +63,7 @@ The configured Discord IDs remain in `settings.py`. The bot refuses to start if 
 - SQLite stores IDs only, not chat text.
 - Render free services use an ephemeral filesystem, so the SQLite mapping is lost on a Render restart, redeploy, or spin-down. For guaranteed cross-deploy edit/delete cleanup, move `MessageState` to Render Postgres/Key Value or attach a persistent disk on an eligible plan.
 - The old Flask thread, Gunicorn dependency, import-time server startup, and duplicate `on_ready()` keepalive tasks are gone.
-- Health endpoints `/` and `/healthz` run on `aiohttp` in the same asyncio process as Discord.
+- Health endpoints `/` and `/healthz` run on `aiohttp` in the same asyncio process as Discord and bind to `PORT` **before Discord login**, so Render keeps the web service alive during Discord/Cloudflare startup backoff.
 
 ### Discord delivery and media
 

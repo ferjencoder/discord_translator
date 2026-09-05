@@ -108,7 +108,6 @@ class TranslatorBot(discord.Client):
         self.worker_task: asyncio.Task | None = None
         self.reaction_worker_task: asyncio.Task | None = None
         self.self_ping_task: asyncio.Task | None = None
-        self.health_runner: web.AppRunner | None = None
         self._validated_guild = False
         self._reaction_pending: set[tuple[int, str]] = set()
         self._reaction_user_windows: dict[int, deque[float]] = defaultdict(deque)
@@ -141,7 +140,6 @@ class TranslatorBot(discord.Client):
             # Status telemetry is ancillary; command-sync trouble must not take translation offline.
             log.error("Could not sync /translator-status command: %s", exc)
 
-        await self._start_health_server()
         await self._validate_and_load_webhooks()
         self.worker_task = asyncio.create_task(self._event_worker(), name="translation-event-worker")
         self.reaction_worker_task = asyncio.create_task(self._reaction_worker(), name="reaction-translation-worker")
@@ -317,38 +315,10 @@ class TranslatorBot(discord.Client):
         if any(tasks):
             await asyncio.gather(*(t for t in tasks if t), return_exceptions=True)
 
-        if self.health_runner:
-            await self.health_runner.cleanup()
-            self.health_runner = None
-
         if self.http_session and not self.http_session.closed:
             await self.http_session.close()
 
         await super().close()
-
-    async def _start_health_server(self) -> None:
-        async def health(_: web.Request) -> web.Response:
-            payload = {
-                "status": "ok",
-                "discord_ready": self.is_ready(),
-                "queue_depth": self.event_queue.qsize(),
-                "reaction_queue_depth": self.reaction_queue.qsize(),
-                "reaction_translation_enabled": bool(self.settings.reaction_channel_ids or self.settings.reaction_category_ids),
-                "translation_cooldown_seconds": round(
-                    float(self.translator.runtime_status()["cooldown_remaining_seconds"]), 1
-                ),
-                "utc": datetime.now(timezone.utc).isoformat(),
-            }
-            return web.json_response(payload)
-
-        app = web.Application()
-        app.router.add_get("/", health)
-        app.router.add_get("/healthz", health)
-        self.health_runner = web.AppRunner(app, access_log=None)
-        await self.health_runner.setup()
-        site = web.TCPSite(self.health_runner, "0.0.0.0", self.settings.port)
-        await site.start()
-        log.info("Health server listening on port %d", self.settings.port)
 
     async def _self_ping_loop(self) -> None:
         assert self.http_session is not None
@@ -1355,52 +1325,146 @@ class TranslatorBot(discord.Client):
         await self.state.delete_source(source_message_id)
 
 
+async def _start_service_health_server(
+    settings: Settings,
+    runtime: dict[str, object],
+) -> web.AppRunner:
+    """Bind Render's HTTP port before Discord login begins.
+
+    Discord/Cloudflare can rate-limit the shared Render egress IP during
+    /users/@me. If the health server only starts from discord.py setup_hook,
+    Render sees no open port and kills the web service before our startup
+    backoff can retry. This server must therefore exist for the full process
+    lifetime, including login backoff periods.
+    """
+
+    async def health(_: web.Request) -> web.Response:
+        client = runtime.get("client")
+        discord_ready = bool(client and getattr(client, "is_ready", lambda: False)())
+
+        queue_depth = 0
+        reaction_queue_depth = 0
+        translation_cooldown = 0.0
+        if client is not None:
+            event_queue = getattr(client, "event_queue", None)
+            reaction_queue = getattr(client, "reaction_queue", None)
+            if event_queue is not None:
+                queue_depth = event_queue.qsize()
+            if reaction_queue is not None:
+                reaction_queue_depth = reaction_queue.qsize()
+            translator = getattr(client, "translator", None)
+            if translator is not None:
+                try:
+                    translation_cooldown = round(
+                        float(translator.runtime_status()["cooldown_remaining_seconds"]), 1
+                    )
+                except Exception:
+                    translation_cooldown = 0.0
+
+        payload = {
+            "status": "ok",
+            "service_state": runtime.get("service_state", "starting"),
+            "discord_ready": discord_ready,
+            "queue_depth": queue_depth,
+            "reaction_queue_depth": reaction_queue_depth,
+            "translation_cooldown_seconds": translation_cooldown,
+            "startup_retry_seconds": runtime.get("startup_retry_seconds", 0),
+            "startup_error": runtime.get("startup_error"),
+            "utc": datetime.now(timezone.utc).isoformat(),
+        }
+        return web.json_response(payload)
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/healthz", health)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", settings.port)
+    await site.start()
+    log.info("Health server listening on port %d before Discord login", settings.port)
+    return runner
+
+
 async def run_bot(settings: Settings) -> None:
-    # A cloud host can temporarily inherit a Discord/Cloudflare-banned shared egress
-    # IP. If login itself returns 429, crashing causes Render to restart immediately
-    # and hammer /users/@me again. Keep one process alive and retry conservatively.
+    # Render free web services must bind a public port during deploy. Start that
+    # listener before touching Discord so a Cloudflare 1015 login backoff does
+    # not look like a failed web-service deploy.
+    runtime: dict[str, object] = {
+        "client": None,
+        "service_state": "starting",
+        "startup_retry_seconds": 0,
+        "startup_error": None,
+    }
+    health_runner = await _start_service_health_server(settings, runtime)
+
+    # A cloud host can temporarily inherit a Discord/Cloudflare-banned shared
+    # egress IP. If login itself returns 429, crashing causes Render to restart
+    # immediately and hammer /users/@me again. Keep one process alive and retry
+    # conservatively while the health endpoint keeps Render satisfied.
     backoff = settings.discord_startup_429_initial_backoff_seconds
 
-    while True:
-        client = TranslatorBot(settings)
-        login_rate_limited = False
-        wait_seconds = backoff
-        cloudflare_1015 = False
+    try:
+        while True:
+            client = TranslatorBot(settings)
+            runtime["client"] = client
+            runtime["service_state"] = "connecting_discord"
+            runtime["startup_retry_seconds"] = 0
+            runtime["startup_error"] = None
 
-        try:
-            await client.start(settings.discord_token)
-        except discord.HTTPException as exc:
-            if exc.status != 429:
-                raise
+            login_rate_limited = False
+            wait_seconds = backoff
+            cloudflare_1015 = False
 
-            login_rate_limited = True
-            cloudflare_1015 = is_cloudflare_1015(exc)
-            retry_after = retry_after_from_exception(exc)
-            if retry_after is not None:
-                wait_seconds = max(wait_seconds, retry_after)
-            wait_seconds = min(wait_seconds, settings.discord_startup_429_max_backoff_seconds)
+            try:
+                await client.start(settings.discord_token)
+            except discord.HTTPException as exc:
+                if exc.status != 429:
+                    runtime["service_state"] = "startup_failed"
+                    runtime["startup_error"] = f"Discord HTTP {exc.status}"
+                    raise
 
-            log.error(
-                "Discord API login rate-limited%s; keeping process alive and retrying in %.0fs "
-                "instead of exiting/restarting",
-                " by Cloudflare 1015" if cloudflare_1015 else "",
-                wait_seconds,
-            )
-        finally:
-            if not client.is_closed():
-                await client.close()
+                login_rate_limited = True
+                cloudflare_1015 = is_cloudflare_1015(exc)
+                retry_after = retry_after_from_exception(exc)
+                if retry_after is not None:
+                    wait_seconds = max(wait_seconds, retry_after)
+                wait_seconds = min(wait_seconds, settings.discord_startup_429_max_backoff_seconds)
 
-        if login_rate_limited:
-            await asyncio.sleep(wait_seconds)
-            backoff = min(
-                settings.discord_startup_429_max_backoff_seconds,
-                max(backoff * 2.0, settings.discord_startup_429_initial_backoff_seconds),
-            )
-            continue
+                runtime["service_state"] = "discord_login_rate_limited"
+                runtime["startup_retry_seconds"] = round(wait_seconds, 1)
+                runtime["startup_error"] = "Cloudflare 1015" if cloudflare_1015 else "Discord 429"
 
-        if client.startup_error:
-            raise RuntimeError(f"Startup validation failed: {client.startup_error}") from client.startup_error
-        return
+                log.error(
+                    "Discord API login rate-limited%s; keeping process alive and retrying in %.0fs "
+                    "instead of exiting/restarting",
+                    " by Cloudflare 1015" if cloudflare_1015 else "",
+                    wait_seconds,
+                )
+            finally:
+                if not client.is_closed():
+                    await client.close()
+
+            if login_rate_limited:
+                # The process remains healthy from Render's perspective because
+                # _start_service_health_server() is still bound to PORT.
+                runtime["client"] = None
+                await asyncio.sleep(wait_seconds)
+                backoff = min(
+                    settings.discord_startup_429_max_backoff_seconds,
+                    max(backoff * 2.0, settings.discord_startup_429_initial_backoff_seconds),
+                )
+                continue
+
+            if client.startup_error:
+                runtime["service_state"] = "startup_failed"
+                runtime["startup_error"] = str(client.startup_error)
+                raise RuntimeError(f"Startup validation failed: {client.startup_error}") from client.startup_error
+
+            runtime["service_state"] = "stopped"
+            runtime["client"] = None
+            return
+    finally:
+        await health_runner.cleanup()
 
 
 def main() -> None:
