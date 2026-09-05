@@ -174,6 +174,10 @@ class Settings:
     webhook_retries: int
     webhook_start_interval_seconds: float
     webhook_429_cooldown_seconds: float
+    webhook_max_retry_after_seconds: float
+    webhook_quarantine_seconds: float
+    webhook_send_timeout_seconds: float
+    webhook_delivery_timeout_seconds: float
     max_reupload_bytes: int
     max_total_reupload_bytes: int
     silent_translations: bool
@@ -249,9 +253,13 @@ def load_settings() -> Settings:
         google_cloud_usd_per_million_chars=_env_float(
             "GOOGLE_CLOUD_USD_PER_MILLION_CHARS", 20.0, 0.0
         ),
-        webhook_retries=_env_int("WEBHOOK_RETRIES", 3, 1),
-        webhook_start_interval_seconds=_env_float("WEBHOOK_START_INTERVAL_SECONDS", 0.35, 0.0),
-        webhook_429_cooldown_seconds=_env_float("WEBHOOK_429_COOLDOWN_SECONDS", 60.0, 1.0),
+        webhook_retries=_env_int("WEBHOOK_RETRIES", 2, 1),
+        webhook_start_interval_seconds=_env_float("WEBHOOK_START_INTERVAL_SECONDS", 0.50, 0.0),
+        webhook_429_cooldown_seconds=_env_float("WEBHOOK_429_COOLDOWN_SECONDS", 10.0, 1.0),
+        webhook_max_retry_after_seconds=_env_float("WEBHOOK_MAX_RETRY_AFTER_SECONDS", 30.0, 1.0),
+        webhook_quarantine_seconds=_env_float("WEBHOOK_QUARANTINE_SECONDS", 300.0, 1.0),
+        webhook_send_timeout_seconds=_env_float("WEBHOOK_SEND_TIMEOUT_SECONDS", 15.0, 1.0),
+        webhook_delivery_timeout_seconds=_env_float("WEBHOOK_DELIVERY_TIMEOUT_SECONDS", 25.0, 1.0),
         max_reupload_bytes=_env_int("MAX_REUPLOAD_BYTES", 8 * 1024 * 1024, 0),
         max_total_reupload_bytes=_env_int("MAX_TOTAL_REUPLOAD_BYTES", 20 * 1024 * 1024, 0),
         silent_translations=_env_bool("SILENT_TRANSLATIONS", False),

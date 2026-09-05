@@ -89,10 +89,15 @@ class TranslatorBot(discord.Client):
             settings.translation_failure_mode,
         )
         log.info(
-            "Discord delivery config start_interval=%.2fs retries=%d 429_cooldown=%.1fs",
+            "Discord delivery config start_interval=%.2fs retries=%d 429_cooldown=%.1fs "
+            "max_retry_after=%.1fs quarantine=%.1fs send_timeout=%.1fs delivery_timeout=%.1fs",
             settings.webhook_start_interval_seconds,
             settings.webhook_retries,
             settings.webhook_429_cooldown_seconds,
+            settings.webhook_max_retry_after_seconds,
+            settings.webhook_quarantine_seconds,
+            settings.webhook_send_timeout_seconds,
+            settings.webhook_delivery_timeout_seconds,
         )
 
         self.http_session: aiohttp.ClientSession | None = None
@@ -111,6 +116,9 @@ class TranslatorBot(discord.Client):
         # from one language cannot trigger a retry storm across every destination.
         self._webhook_gate = asyncio.Lock()
         self._webhook_next_send_at = 0.0
+        # Pathological Retry-After values quarantine only the affected destination.
+        # A broken EN webhook must not stop ES/FR/DE/etc.
+        self._webhook_quarantine_until: dict[int, float] = {}
         self.startup_error: BaseException | None = None
 
     async def setup_hook(self) -> None:
@@ -182,6 +190,15 @@ class TranslatorBot(discord.Client):
         cooldown = float(runtime["cooldown_remaining_seconds"])
         cooldown_text = f"ACTIVE - {cooldown:.0f}s remaining" if cooldown > 0.5 else "clear"
 
+        now_mono = time.monotonic()
+        webhook_gate_wait = max(0.0, self._webhook_next_send_at - now_mono)
+        quarantined = []
+        for runtime_channel in self.settings.channels:
+            remaining = self._webhook_quarantine_until.get(runtime_channel.spec.channel_id, 0.0) - now_mono
+            if remaining > 0.5:
+                quarantined.append(f"{runtime_channel.spec.lang.upper()} {remaining:.0f}s")
+        quarantine_text = ", ".join(quarantined) if quarantined else "none"
+
         projected_chars = last_24h.source_chars * 30
         free_chars = self.settings.google_cloud_free_chars_monthly
         usd_per_million = self.settings.google_cloud_usd_per_million_chars
@@ -204,6 +221,17 @@ class TranslatorBot(discord.Client):
                 f"**{self.settings.translation_start_interval_seconds:.2f}s** spacing\n"
                 f"429 cooldown: **{self.settings.translation_429_cooldown_seconds:.0f}s** | "
                 f"Fallback delay: **{self.settings.translation_fallback_delay_seconds:.0f}s**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Discord delivery",
+            value=(
+                f"Quarantined destinations: **{quarantine_text}**\n"
+                f"Gate wait: **{webhook_gate_wait:.1f}s**\n"
+                f"Send timeout: **{self.settings.webhook_send_timeout_seconds:.0f}s** | "
+                f"Delivery timeout: **{self.settings.webhook_delivery_timeout_seconds:.0f}s**\n"
+                f"Retry-After cap: **{self.settings.webhook_max_retry_after_seconds:.0f}s**"
             ),
             inline=False,
         )
@@ -960,7 +988,26 @@ class TranslatorBot(discord.Client):
         if not text.strip() and not media_blobs and not media_fallbacks:
             return
 
-        target_runtimes = [c for c in self.settings.channels if c.spec.channel_id != message.channel.id]
+        now_mono = time.monotonic()
+        target_runtimes = [
+            c for c in self.settings.channels
+            if c.spec.channel_id != message.channel.id
+            and self._webhook_quarantine_until.get(c.spec.channel_id, 0.0) <= now_mono
+        ]
+        skipped_quarantined = [
+            c.spec.lang.upper() for c in self.settings.channels
+            if c.spec.channel_id != message.channel.id
+            and self._webhook_quarantine_until.get(c.spec.channel_id, 0.0) > now_mono
+        ]
+        if skipped_quarantined:
+            log.warning(
+                "Skipping quarantined webhook destination(s) for source=%s: %s",
+                message.id,
+                ", ".join(skipped_quarantined),
+            )
+        if not target_runtimes:
+            log.error("No healthy webhook destinations available for source=%s", message.id)
+            return
 
         async def translate_target(target: RuntimeChannel) -> tuple[RuntimeChannel, TranslationResult]:
             if text.strip():
@@ -984,22 +1031,37 @@ class TranslatorBot(discord.Client):
 
         # Send destination copies concurrently after translation work is complete.
         # Translation provider traffic itself is controlled by TranslationService.
+        # Every destination has a hard end-to-end timeout so a Discord webhook cannot
+        # stall the single event worker and block later source messages.
         deliveries = []
+
+        async def deliver_target(target: RuntimeChannel, output: str) -> None:
+            try:
+                await asyncio.wait_for(
+                    self._send_translation(
+                        source_message_id=message.id,
+                        target=target,
+                        translated=output,
+                        media_blobs=media_blobs,
+                        media_fallbacks=media_fallbacks,
+                        username=username,
+                        avatar_url=avatar_url,
+                    ),
+                    timeout=self.settings.webhook_delivery_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                log.error(
+                    "Destination delivery timed out after %.1fs source=%s target=%s; continuing",
+                    self.settings.webhook_delivery_timeout_seconds,
+                    message.id,
+                    target.spec.lang.upper(),
+                )
+
         for target, result in translated:
             output = self._translation_output(result, source_lang, target.spec.lang)
             if output is None:
                 continue
-            deliveries.append(
-                self._send_translation(
-                    source_message_id=message.id,
-                    target=target,
-                    translated=output,
-                    media_blobs=media_blobs,
-                    media_fallbacks=media_fallbacks,
-                    username=username,
-                    avatar_url=avatar_url,
-                )
-            )
+            deliveries.append(deliver_target(target, output))
 
         if deliveries:
             await asyncio.gather(*deliveries)
@@ -1055,10 +1117,24 @@ class TranslatorBot(discord.Client):
         webhook = self.webhooks[target.spec.channel_id]
 
         for attempt in range(1, self.settings.webhook_retries + 1):
+            quarantine_remaining = (
+                self._webhook_quarantine_until.get(target.spec.channel_id, 0.0)
+                - time.monotonic()
+            )
+            if quarantine_remaining > 0:
+                log.warning(
+                    "Webhook destination %s quarantined %.1fs remaining; dropping this event",
+                    target.spec.lang.upper(),
+                    quarantine_remaining,
+                )
+                return None
+
             files = [
                 discord.File(io.BytesIO(blob.data), filename=blob.filename, description=blob.description)
                 for blob in blobs
             ]
+            excessive_retry_after = 0.0
+
             try:
                 kwargs = {
                     "content": content,
@@ -1070,54 +1146,164 @@ class TranslatorBot(discord.Client):
                 }
                 if files:
                     kwargs["files"] = files
+
                 async with self._webhook_gate:
-                    wait_seconds = self._webhook_next_send_at - time.monotonic()
+                    now = time.monotonic()
+
+                    # Another task may have quarantined this destination while we
+                    # were queued behind the shared request-start gate.
+                    quarantine_remaining = (
+                        self._webhook_quarantine_until.get(target.spec.channel_id, 0.0)
+                        - now
+                    )
+                    if quarantine_remaining > 0:
+                        log.warning(
+                            "Webhook destination %s quarantined %.1fs remaining; dropping this event",
+                            target.spec.lang.upper(),
+                            quarantine_remaining,
+                        )
+                        return None
+
+                    wait_seconds = self._webhook_next_send_at - now
                     if wait_seconds > 0:
-                        await asyncio.sleep(wait_seconds)
+                        # This should always be bounded. Never trust stale/internal
+                        # state enough to sleep the shared gate for minutes or hours.
+                        if wait_seconds > self.settings.webhook_max_retry_after_seconds:
+                            log.error(
+                                "Internal webhook gate delay %.1fs exceeded %.1fs cap; resetting gate",
+                                wait_seconds,
+                                self.settings.webhook_max_retry_after_seconds,
+                            )
+                            self._webhook_next_send_at = now
+                        else:
+                            await asyncio.sleep(wait_seconds)
+
                     try:
-                        message = await webhook.send(**kwargs)
+                        message = await asyncio.wait_for(
+                            webhook.send(**kwargs),
+                            timeout=self.settings.webhook_send_timeout_seconds,
+                        )
                     except discord.HTTPException as exc:
                         if exc.status == 429:
                             retry_after = self._discord_retry_after(exc)
-                            cooldown = max(self.settings.webhook_429_cooldown_seconds, retry_after)
-                            self._webhook_next_send_at = time.monotonic() + cooldown
+                            if retry_after > self.settings.webhook_max_retry_after_seconds:
+                                excessive_retry_after = retry_after
+                                self._webhook_quarantine_until[target.spec.channel_id] = max(
+                                    self._webhook_quarantine_until.get(target.spec.channel_id, 0.0),
+                                    time.monotonic() + self.settings.webhook_quarantine_seconds,
+                                )
+                                # Never copy a pathological Retry-After (for example
+                                # ~24 hours) into the shared gate.
+                                self._webhook_next_send_at = (
+                                    time.monotonic()
+                                    + self.settings.webhook_start_interval_seconds
+                                )
+                            else:
+                                cooldown = min(
+                                    max(self.settings.webhook_429_cooldown_seconds, retry_after),
+                                    self.settings.webhook_max_retry_after_seconds,
+                                )
+                                self._webhook_next_send_at = max(
+                                    self._webhook_next_send_at,
+                                    time.monotonic() + cooldown,
+                                )
                         else:
                             self._webhook_next_send_at = (
                                 time.monotonic() + self.settings.webhook_start_interval_seconds
                             )
                         raise
+                    except (asyncio.TimeoutError, aiohttp.ClientError):
+                        self._webhook_next_send_at = (
+                            time.monotonic() + self.settings.webhook_start_interval_seconds
+                        )
+                        raise
+
                     self._webhook_next_send_at = (
                         time.monotonic() + self.settings.webhook_start_interval_seconds
                     )
                     return message
+
             except (discord.NotFound, discord.Forbidden) as exc:
                 log.error("Permanent webhook failure for %s: %s", target.spec.lang.upper(), exc)
                 return None
+
             except discord.HTTPException as exc:
-                # discord.py handles normal rate-limit buckets. Retry transient server/network failures.
                 if exc.status < 500 and exc.status != 429:
-                    log.error("Non-retryable webhook HTTP %s for %s: %s", exc.status, target.spec.lang.upper(), exc)
+                    log.error(
+                        "Non-retryable webhook HTTP %s for %s: %s",
+                        exc.status,
+                        target.spec.lang.upper(),
+                        exc,
+                    )
                     return None
+
+                if exc.status == 429 and excessive_retry_after > 0:
+                    log.error(
+                        "Discord returned excessive webhook Retry-After %.2fs for %s "
+                        "(cap %.1fs). Quarantined only this destination for %.1fs; "
+                        "other language webhooks continue.",
+                        excessive_retry_after,
+                        target.spec.lang.upper(),
+                        self.settings.webhook_max_retry_after_seconds,
+                        self.settings.webhook_quarantine_seconds,
+                    )
+                    return None
+
                 if attempt >= self.settings.webhook_retries:
                     log.error("Webhook retries exhausted for %s: %s", target.spec.lang.upper(), exc)
                     return None
+
                 if exc.status == 429:
-                    delay = max(
-                        self.settings.webhook_429_cooldown_seconds,
-                        self._discord_retry_after(exc),
+                    raw_retry_after = self._discord_retry_after(exc)
+                    delay = min(
+                        max(self.settings.webhook_429_cooldown_seconds, raw_retry_after),
+                        self.settings.webhook_max_retry_after_seconds,
                     )
+                    log.warning(
+                        "Webhook transient error 429 for %s; bounded retry in %.2fs "
+                        "(Discord Retry-After %.2fs)",
+                        target.spec.lang.upper(),
+                        delay,
+                        raw_retry_after,
+                    )
+                    # The shared gate owns the bounded wait.
                 else:
                     delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
-                log.warning("Webhook transient error %s for %s; retrying in %.2fs", exc.status, target.spec.lang.upper(), delay)
-                # The shared gate owns the global 429 wait. Sleeping here as well
-                # would double the cooldown; non-429 failures still back off locally.
-                if exc.status != 429:
+                    log.warning(
+                        "Webhook transient error %s for %s; retrying in %.2fs",
+                        exc.status,
+                        target.spec.lang.upper(),
+                        delay,
+                    )
                     await asyncio.sleep(delay)
+
+            except asyncio.TimeoutError:
+                if attempt >= self.settings.webhook_retries:
+                    log.error(
+                        "Webhook send timed out for %s after %d attempt(s)",
+                        target.spec.lang.upper(),
+                        attempt,
+                    )
+                    return None
+                delay = min(4.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.25)
+                log.warning(
+                    "Webhook send timeout for %s; retrying in %.2fs",
+                    target.spec.lang.upper(),
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
             except aiohttp.ClientError as exc:
                 if attempt >= self.settings.webhook_retries:
                     log.error("Webhook network retries exhausted for %s: %s", target.spec.lang.upper(), exc)
                     return None
                 delay = min(8.0, 2 ** (attempt - 1)) + random.uniform(0.0, 0.35)
+                log.warning(
+                    "Webhook network error for %s: %s; retrying in %.2fs",
+                    target.spec.lang.upper(),
+                    exc,
+                    delay,
+                )
                 await asyncio.sleep(delay)
 
         return None
@@ -1134,6 +1320,7 @@ class TranslatorBot(discord.Client):
         except (TypeError, ValueError):
             return 0.0
 
+
     async def _delete_translations(self, source_message_id: int) -> None:
         rows = await self.state.get(source_message_id)
         if not rows:
@@ -1149,9 +1336,18 @@ class TranslatorBot(discord.Client):
                 continue
             for message_id in message_ids:
                 try:
-                    await webhook.delete_message(message_id)
+                    await asyncio.wait_for(
+                        webhook.delete_message(message_id),
+                        timeout=self.settings.webhook_send_timeout_seconds,
+                    )
                 except discord.NotFound:
                     pass
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "Timed out deleting translated message %s after %.1fs",
+                        message_id,
+                        self.settings.webhook_send_timeout_seconds,
+                    )
                 except (discord.Forbidden, discord.HTTPException) as exc:
                     log.warning("Failed deleting translated message %s: %s", message_id, exc)
 

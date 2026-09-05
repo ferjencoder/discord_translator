@@ -107,3 +107,17 @@ A production Render log confirmed Google `TooManyRequests` after the mobile endp
 - the mobile endpoint no longer performs deep-translator's hidden immediate second request when Google echoes the source text; one service attempt now maps to one Google HTTP call
 
 Two provider-flow tests were added for deferred fallback and 429 retry behavior.
+
+
+## Discord webhook long Retry-After fix
+
+A production log showed `Webhook transient error 429 ... retrying in 84860.00s`. The previous Discord webhook hardening trusted Discord/discord.py's `Retry-After` value without an upper bound and copied it into the shared webhook gate. Because automatic deliveries share that gate and the event worker waits for all destination deliveries, one pathological value could effectively freeze automatic translation for almost a day.
+
+This build adds:
+- a maximum accepted Discord webhook Retry-After
+- per-destination quarantine for excessive Retry-After values
+- a hard timeout around each `webhook.send`
+- a hard end-to-end timeout per destination delivery
+- bounded 429 retry delays
+- fail-fast behavior for quarantined destination webhooks while healthy languages continue
+- safer `.gitignore` rules that keep `.env` secret but allow `.env.example` templates to be committed

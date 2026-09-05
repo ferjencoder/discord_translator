@@ -37,8 +37,13 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.translator_status_role_names, frozenset({"Leader", "Superior", "Superiors"}))
         self.assertEqual(settings.google_cloud_free_chars_monthly, 500000)
         self.assertEqual(settings.google_cloud_usd_per_million_chars, 20.0)
-        self.assertEqual(settings.webhook_start_interval_seconds, 0.35)
-        self.assertEqual(settings.webhook_429_cooldown_seconds, 60.0)
+        self.assertEqual(settings.webhook_retries, 2)
+        self.assertEqual(settings.webhook_start_interval_seconds, 0.50)
+        self.assertEqual(settings.webhook_429_cooldown_seconds, 10.0)
+        self.assertEqual(settings.webhook_max_retry_after_seconds, 30.0)
+        self.assertEqual(settings.webhook_quarantine_seconds, 300.0)
+        self.assertEqual(settings.webhook_send_timeout_seconds, 15.0)
+        self.assertEqual(settings.webhook_delivery_timeout_seconds, 25.0)
 
     def test_non_discord_webhook_is_rejected(self):
         with self.assertRaises(ConfigError):

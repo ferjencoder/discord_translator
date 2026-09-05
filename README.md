@@ -70,6 +70,8 @@ The configured Discord IDs remain in `settings.py`. The bot refuses to start if 
 - Uses `discord.Webhook` instead of manually constructing webhook HTTP requests.
 - Uses `wait=True` so destination message IDs can be recorded.
 - Recreates `discord.File` objects on retries so a consumed file stream is never reused.
+- Discord webhook sends have both per-request and per-destination hard timeouts, so one blocked webhook cannot stall the single translation event worker indefinitely.
+- Discord `Retry-After` values are capped. Implausibly long values quarantine only the affected destination webhook instead of parking the shared webhook gate for hours.
 - Normal Discord attachments are re-uploaded when they fit configured size limits. Oversized or failed downloads fall back to links.
 - GIF/image/video embed URLs are deduplicated.
 - PNG/APNG/GIF stickers are re-uploaded. Lottie stickers fall back to a visible `[Sticker: name]` marker instead of claiming they were converted to PNG.
@@ -156,8 +158,13 @@ TRANSLATION_429_COOLDOWN_SECONDS=120
 TRANSLATION_FALLBACK_DELAY_SECONDS=10
 TRANSLATION_FAILURE_MODE=original
 TRANSLATION_METRICS_RETENTION_DAYS=90
-WEBHOOK_START_INTERVAL_SECONDS=0.35
-WEBHOOK_429_COOLDOWN_SECONDS=60
+WEBHOOK_RETRIES=2
+WEBHOOK_START_INTERVAL_SECONDS=0.50
+WEBHOOK_429_COOLDOWN_SECONDS=10
+WEBHOOK_MAX_RETRY_AFTER_SECONDS=30
+WEBHOOK_QUARANTINE_SECONDS=300
+WEBHOOK_SEND_TIMEOUT_SECONDS=15
+WEBHOOK_DELIVERY_TIMEOUT_SECONDS=25
 TRANSLATOR_STATUS_ROLE_NAMES=Leader,Superior,Superiors
 GOOGLE_CLOUD_FREE_CHARS_MONTHLY=500000
 GOOGLE_CLOUD_USD_PER_MILLION_CHARS=20

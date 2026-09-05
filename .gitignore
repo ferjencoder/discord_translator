@@ -8,7 +8,8 @@ venv/
 # Environment / secrets
 .env
 *.env
-.env.example
+!.env.example
+!*.env.example
 
 # OS
 .DS_Store
@@ -20,4 +21,3 @@ channel_permissions_export_*.csv
 data/*.sqlite3
 data/*.sqlite3-shm
 data/*.sqlite3-wal
-
