@@ -151,6 +151,8 @@ Set the secrets/environment variables from `.env.example` in the Render dashboar
 Recommended translation settings for the unofficial Google endpoint:
 
 ```env
+DISCORD_STARTUP_429_INITIAL_BACKOFF_SECONDS=300
+DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS=3600
 TRANSLATION_CONCURRENCY=1
 TRANSLATION_START_INTERVAL_SECONDS=1.5
 TRANSLATION_RETRIES=2
@@ -380,3 +382,7 @@ It does not need permission to manage other users' messages. It only deletes/edi
 ## Why source language uses auto-detection here
 
 Dedicated language channels have a known source language from their channel. Topic channels do not: Spanish, English, German, etc. can all appear in the same channel. Reaction translation therefore uses source `auto` only for this mode, while the original 10 dedicated channels continue using their known source language.
+
+### Discord API startup 429 / Cloudflare 1015
+
+If Discord rate-limits the host IP before gateway login (for example Cloudflare Error 1015 on `GET /users/@me`), the bot no longer exits and triggers a Render restart loop. It keeps the process alive and retries login with exponential backoff starting at `DISCORD_STARTUP_429_INITIAL_BACKOFF_SECONDS`, capped by `DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS`. Non-429 startup errors still fail fast.

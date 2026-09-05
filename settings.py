@@ -158,6 +158,8 @@ class Settings:
     self_ping_enabled: bool
     self_ping_interval_seconds: int
     event_queue_size: int
+    discord_startup_429_initial_backoff_seconds: float
+    discord_startup_429_max_backoff_seconds: float
     translation_concurrency: int
     translation_start_interval_seconds: float
     translation_retries: int
@@ -228,6 +230,12 @@ def load_settings() -> Settings:
         self_ping_enabled=_env_bool("SELF_PING_ENABLED", self_ping_default),
         self_ping_interval_seconds=_env_int("SELF_PING_INTERVAL_SECONDS", 600, 60),
         event_queue_size=_env_int("EVENT_QUEUE_SIZE", 500, 10),
+        discord_startup_429_initial_backoff_seconds=_env_float(
+            "DISCORD_STARTUP_429_INITIAL_BACKOFF_SECONDS", 300.0, 1.0
+        ),
+        discord_startup_429_max_backoff_seconds=_env_float(
+            "DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS", 3600.0, 1.0
+        ),
         # The translator fans one source message out to nine destinations. The old
         # concurrency=3 / 200ms defaults created burst traffic against an unofficial
         # Google endpoint. These stricter defaults deliberately favor reliability over

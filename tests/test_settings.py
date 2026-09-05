@@ -27,6 +27,8 @@ class SettingsTests(unittest.TestCase):
         self.assertFalse(settings.self_ping_enabled)
         self.assertEqual(settings.reaction_channel_ids, frozenset())
         self.assertEqual(settings.reaction_category_ids, frozenset())
+        self.assertEqual(settings.discord_startup_429_initial_backoff_seconds, 300.0)
+        self.assertEqual(settings.discord_startup_429_max_backoff_seconds, 3600.0)
         self.assertEqual(settings.translation_concurrency, 1)
         self.assertEqual(settings.translation_start_interval_seconds, 1.5)
         self.assertEqual(settings.translation_retries, 2)

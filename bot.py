@@ -16,6 +16,7 @@ from aiohttp import web
 from settings import CHANNELS_BY_ID, ConfigError, RuntimeChannel, Settings, load_settings
 from reaction_utils import canonical_flag, label_for_language, language_for_emoji
 from state import MessageState
+from startup_retry import is_cloudflare_1015, retry_after_from_exception
 from text_utils import chunk_text, clean_preview
 from translator import TranslationResult, TranslationService
 
@@ -1355,14 +1356,51 @@ class TranslatorBot(discord.Client):
 
 
 async def run_bot(settings: Settings) -> None:
-    client = TranslatorBot(settings)
-    try:
-        await client.start(settings.discord_token)
-    finally:
-        if not client.is_closed():
-            await client.close()
-    if client.startup_error:
-        raise RuntimeError(f"Startup validation failed: {client.startup_error}") from client.startup_error
+    # A cloud host can temporarily inherit a Discord/Cloudflare-banned shared egress
+    # IP. If login itself returns 429, crashing causes Render to restart immediately
+    # and hammer /users/@me again. Keep one process alive and retry conservatively.
+    backoff = settings.discord_startup_429_initial_backoff_seconds
+
+    while True:
+        client = TranslatorBot(settings)
+        login_rate_limited = False
+        wait_seconds = backoff
+        cloudflare_1015 = False
+
+        try:
+            await client.start(settings.discord_token)
+        except discord.HTTPException as exc:
+            if exc.status != 429:
+                raise
+
+            login_rate_limited = True
+            cloudflare_1015 = is_cloudflare_1015(exc)
+            retry_after = retry_after_from_exception(exc)
+            if retry_after is not None:
+                wait_seconds = max(wait_seconds, retry_after)
+            wait_seconds = min(wait_seconds, settings.discord_startup_429_max_backoff_seconds)
+
+            log.error(
+                "Discord API login rate-limited%s; keeping process alive and retrying in %.0fs "
+                "instead of exiting/restarting",
+                " by Cloudflare 1015" if cloudflare_1015 else "",
+                wait_seconds,
+            )
+        finally:
+            if not client.is_closed():
+                await client.close()
+
+        if login_rate_limited:
+            await asyncio.sleep(wait_seconds)
+            backoff = min(
+                settings.discord_startup_429_max_backoff_seconds,
+                max(backoff * 2.0, settings.discord_startup_429_initial_backoff_seconds),
+            )
+            continue
+
+        if client.startup_error:
+            raise RuntimeError(f"Startup validation failed: {client.startup_error}") from client.startup_error
+        return
 
 
 def main() -> None:

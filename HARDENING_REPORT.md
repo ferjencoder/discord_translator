@@ -121,3 +121,11 @@ This build adds:
 - bounded 429 retry delays
 - fail-fast behavior for quarantined destination webhooks while healthy languages continue
 - safer `.gitignore` rules that keep `.env` secret but allow `.env.example` templates to be committed
+
+## Discord API startup rate-limit containment
+
+- Added explicit handling for HTTP 429 during `client.start()` / `/users/@me` login.
+- Cloudflare Error 1015 no longer crashes the process and causes Render to immediately restart it.
+- Startup login retries use exponential backoff (default 5 minutes, capped at 60 minutes).
+- Retry-After is respected when present, within the configured cap.
+- Non-429 authentication/configuration failures still fail fast.
