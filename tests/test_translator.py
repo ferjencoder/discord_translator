@@ -57,6 +57,7 @@ class FakeTranslationService(TranslationService):
 
     async def _wait_for_start_slot(self):
         self.start_gate_calls += 1
+        return True
 
     async def _activate_429_cooldown(self):
         self.cooldown_calls += 1
@@ -85,7 +86,7 @@ class TranslationServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.start_gate_calls, 2)
         sleep_mock.assert_awaited_once_with(10.0)
 
-    async def test_429_retries_after_global_gate_without_short_backoff(self):
+    async def test_429_opens_circuit_and_aborts_without_retry(self):
         service = FakeTranslationService([
             TooManyRequests(),
             "hallo",
@@ -94,11 +95,11 @@ class TranslationServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch("translator.asyncio.sleep", new=AsyncMock()) as sleep_mock:
             result = await service.translate("hello", "en", "de")
 
-        self.assertTrue(result.ok)
+        self.assertFalse(result.ok)
         self.assertEqual(result.rate_limit_errors, 1)
         self.assertEqual(service.cooldown_calls, 1)
-        self.assertEqual(service.endpoints, ["mobile", "mobile"])
-        self.assertEqual(service.start_gate_calls, 2)
+        self.assertEqual(service.endpoints, ["mobile"])
+        self.assertEqual(service.start_gate_calls, 1)
         sleep_mock.assert_not_awaited()
 
 

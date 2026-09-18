@@ -246,13 +246,13 @@ def load_settings() -> Settings:
         translation_connect_timeout_seconds=_env_float("TRANSLATION_CONNECT_TIMEOUT_SECONDS", 5.0, 0.1),
         translation_read_timeout_seconds=_env_float("TRANSLATION_READ_TIMEOUT_SECONDS", 15.0, 0.1),
         translation_task_timeout_seconds=_env_float("TRANSLATION_TASK_TIMEOUT_SECONDS", 25.0, 1.0),
-        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 120.0, 1.0),
+        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 1800.0, 1.0),
         translation_fallback_delay_seconds=_env_float(
             "TRANSLATION_FALLBACK_DELAY_SECONDS", 10.0, 0.0
         ),
         translation_failure_mode=_env_choice(
             "TRANSLATION_FAILURE_MODE",
-            "original",
+            "skip",
             {"original", "skip", "marked"},
         ),
         translation_metrics_retention_days=_env_int("TRANSLATION_METRICS_RETENTION_DAYS", 90, 1),

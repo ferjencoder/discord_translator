@@ -1159,9 +1159,13 @@ class TranslatorBot(discord.Client):
                             retry_after = self._discord_retry_after(exc)
                             if retry_after > self.settings.webhook_max_retry_after_seconds:
                                 excessive_retry_after = retry_after
+                                quarantine_seconds = max(
+                                    self.settings.webhook_quarantine_seconds,
+                                    retry_after,
+                                )
                                 self._webhook_quarantine_until[target.spec.channel_id] = max(
                                     self._webhook_quarantine_until.get(target.spec.channel_id, 0.0),
-                                    time.monotonic() + self.settings.webhook_quarantine_seconds,
+                                    time.monotonic() + quarantine_seconds,
                                 )
                                 # Never copy a pathological Retry-After (for example
                                 # ~24 hours) into the shared gate.
@@ -1211,12 +1215,12 @@ class TranslatorBot(discord.Client):
                 if exc.status == 429 and excessive_retry_after > 0:
                     log.error(
                         "Discord returned excessive webhook Retry-After %.2fs for %s "
-                        "(cap %.1fs). Quarantined only this destination for %.1fs; "
-                        "other language webhooks continue.",
+                        "(cap %.1fs). Quarantined only this destination for the actual "
+                        "Retry-After window (%.1fs); other language webhooks continue.",
                         excessive_retry_after,
                         target.spec.lang.upper(),
                         self.settings.webhook_max_retry_after_seconds,
-                        self.settings.webhook_quarantine_seconds,
+                        max(self.settings.webhook_quarantine_seconds, excessive_retry_after),
                     )
                     return None
 

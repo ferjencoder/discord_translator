@@ -213,21 +213,28 @@ class TranslationService:
         self._pool_lock = threading.Lock()
         self._translators: dict[tuple[str, str], tuple[TimeoutGoogleTranslator, threading.Lock]] = {}
 
-    async def _wait_for_start_slot(self) -> None:
+    async def _wait_for_start_slot(self) -> bool:
         async with self._rate_lock:
             now = time.monotonic()
-            wait_until = max(self._next_start, self._cooldown_until)
-            if wait_until > now:
-                await asyncio.sleep(wait_until - now)
+            # A Google 429 opens a global circuit breaker. Do not queue every
+            # destination behind a long sleep and then hammer Google again.
+            if self._cooldown_until > now:
+                return False
+            if self._next_start > now:
+                await asyncio.sleep(self._next_start - now)
                 now = time.monotonic()
             self._next_start = now + self._start_interval
+            return True
 
     async def _activate_429_cooldown(self) -> None:
         async with self._rate_lock:
             until = time.monotonic() + self._cooldown_429
             if until > self._cooldown_until:
                 self._cooldown_until = until
-            log.warning("Google translation rate limit detected; global cooldown %.1fs", self._cooldown_429)
+            log.warning(
+                "Google translation rate limit detected; circuit breaker open for %.1fs",
+                self._cooldown_429,
+            )
 
     def _translator_for(self, source: str, target: str) -> tuple[TimeoutGoogleTranslator, threading.Lock]:
         key = (source, target)
@@ -328,14 +335,28 @@ class TranslationService:
         rate_limit_errors = 0
         timeout_errors = 0
         endpoint = "mobile"
+        attempts_made = 0
 
         for attempt in range(1, self._retries + 1):
+            attempts_made = attempt
             try:
                 async with self._semaphore:
                     # Every provider HTTP call, including JSON fallback, must pass this
                     # gate. A 429 moves _cooldown_until forward, so all pending target
                     # languages stop starting new Google requests until the cooldown ends.
-                    await self._wait_for_start_slot()
+                    if not await self._wait_for_start_slot():
+                        remaining = max(0.0, self._cooldown_until - time.monotonic())
+                        log.warning(
+                            "Google circuit breaker open; skipping translation %s->%s (%.0fs remaining)",
+                            source, target, remaining,
+                        )
+                        return TranslationResult(
+                            text=text,
+                            ok=False,
+                            attempts=0,
+                            error="GoogleCircuitOpen",
+                            rate_limit_errors=1,
+                        )
                     translated = await asyncio.wait_for(
                         asyncio.to_thread(
                             self._translate_sync,
@@ -376,16 +397,14 @@ class TranslationService:
                     break
 
                 if rate_limited:
-                    # Do not add a contradictory 1-10 second retry timer. The next
-                    # attempt will pass through _wait_for_start_slot(), which waits for
-                    # the full global 429 cooldown. Keep the same endpoint after a 429.
+                    # One 429 is enough. The global circuit breaker is now open, so
+                    # retrying this language would only waste time and extend the queue.
                     log.warning(
-                        "Translation %s->%s failed attempt %d/%d via %s: %s; "
-                        "retry deferred until global %.0fs cooldown clears",
-                        source, target, attempt, self._retries, endpoint,
-                        self._describe_error(exc), self._cooldown_429,
+                        "Translation %s->%s hit Google rate limit via %s; "
+                        "aborting immediately and opening global circuit for %.0fs",
+                        source, target, endpoint, self._cooldown_429,
                     )
-                    continue
+                    break
 
                 if endpoint == "mobile" and self._should_defer_to_json(exc):
                     # TranslationNotFound can be Google's challenge/anti-bot HTML rather
@@ -415,14 +434,14 @@ class TranslationService:
             "Translation %s->%s failed permanently after %d attempts: %s",
             source,
             target,
-            self._retries,
+            attempts_made,
             self._describe_error(last_error),
         )
 
         return TranslationResult(
             text=text,
             ok=False,
-            attempts=self._retries,
+            attempts=attempts_made,
             error=error_name,
             rate_limit_errors=rate_limit_errors,
             timeout_errors=timeout_errors,
