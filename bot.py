@@ -74,19 +74,13 @@ class TranslatorBot(discord.Client):
             concurrency=settings.translation_concurrency,
             start_interval_seconds=settings.translation_start_interval_seconds,
             retries=settings.translation_retries,
-            connect_timeout_seconds=settings.translation_connect_timeout_seconds,
-            read_timeout_seconds=settings.translation_read_timeout_seconds,
             task_timeout_seconds=settings.translation_task_timeout_seconds,
-            cooldown_429_seconds=settings.translation_429_cooldown_seconds,
-            fallback_delay_seconds=settings.translation_fallback_delay_seconds,
         )
         log.info(
-            "Translation config concurrency=%d start_interval=%.2fs retries=%d 429_cooldown=%.1fs fallback_delay=%.1fs failure_mode=%s",
+            "Translation config concurrency=%d start_interval=%.2fs retries=%d failure_mode=%s (Argos CPU)",
             settings.translation_concurrency,
             settings.translation_start_interval_seconds,
             settings.translation_retries,
-            settings.translation_429_cooldown_seconds,
-            settings.translation_fallback_delay_seconds,
             settings.translation_failure_mode,
         )
         log.info(
@@ -186,9 +180,6 @@ class TranslatorBot(discord.Client):
             color = 0xEF4444
 
         runtime = self.translator.runtime_status()
-        cooldown = float(runtime["cooldown_remaining_seconds"])
-        cooldown_text = f"ACTIVE - {cooldown:.0f}s remaining" if cooldown > 0.5 else "clear"
-
         now_mono = time.monotonic()
         webhook_gate_wait = max(0.0, self._webhook_next_send_at - now_mono)
         quarantined = []
@@ -199,27 +190,20 @@ class TranslatorBot(discord.Client):
         quarantine_text = ", ".join(quarantined) if quarantined else "none"
 
         projected_chars = last_24h.source_chars * 30
-        free_chars = self.settings.google_cloud_free_chars_monthly
-        usd_per_million = self.settings.google_cloud_usd_per_million_chars
-        projected_billable = max(0, projected_chars - free_chars)
-        projected_cost = projected_billable / 1_000_000 * usd_per_million
-
         embed = discord.Embed(
             title="OZY Translator Status",
-            description=f"**{health_label}** - Google web translator (unofficial endpoint)",
+            description=f"**{health_label}** - Argos Translate (local CPU)",
             color=color,
             timestamp=datetime.now(timezone.utc),
         )
         embed.add_field(
             name="Provider now",
             value=(
-                f"Cooldown: **{cooldown_text}**\n"
+                f"Model running: **{runtime['busy']}**\n"
                 f"Automatic queue: **{self.event_queue.qsize()}**\n"
                 f"Reaction queue: **{self.reaction_queue.qsize()}**\n"
                 f"Throttle: **{self.settings.translation_concurrency}** concurrent, "
                 f"**{self.settings.translation_start_interval_seconds:.2f}s** spacing\n"
-                f"429 cooldown: **{self.settings.translation_429_cooldown_seconds:.0f}s** | "
-                f"Fallback delay: **{self.settings.translation_fallback_delay_seconds:.0f}s**"
             ),
             inline=False,
         )
@@ -249,13 +233,11 @@ class TranslatorBot(discord.Client):
             inline=False,
         )
         embed.add_field(
-            name="Usage / Cloud estimate",
+            name="Local translation usage",
             value=(
                 f"Request characters, last 30d: **{last_30d.source_chars:,}**\n"
                 f"24h pace projected to 30d: **{projected_chars:,} chars**\n"
-                f"Configured Cloud allowance: **{free_chars:,} chars/month**\n"
-                f"Estimated cost at that pace: **${projected_cost:,.2f}/month** "
-                f"at ${usd_per_million:g}/1M chars"
+                "Translation API charges: **$0** (hosting resources are separate)"
             ),
             inline=False,
         )
@@ -268,7 +250,7 @@ class TranslatorBot(discord.Client):
         embed.set_footer(
             text=(
                 f"Metrics retained {self.settings.translation_metrics_retention_days} days. "
-                "Character cost is an estimate and pricing is configurable."
+                "Historical metrics may include the previous provider."
             )
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -422,7 +404,7 @@ class TranslatorBot(discord.Client):
     def _is_reaction_channel(self, channel: object) -> bool:
         # Dedicated language channels always use the automatic fan-out mode only.
         channel_id = getattr(channel, "id", None)
-        if channel_id in self.channels_by_id:
+        if channel_id in CHANNELS_BY_ID:
             return False
         if channel_id in self.settings.reaction_channel_ids:
             return True
@@ -493,7 +475,7 @@ class TranslatorBot(discord.Client):
             return
 
         language = language_for_emoji(str(payload.emoji))
-        if language is None:
+        if language is None or language.lang not in self.settings.active_languages:
             return
 
         channel = self.get_channel(payload.channel_id)
@@ -934,13 +916,7 @@ class TranslatorBot(discord.Client):
             result.error,
             mode,
         )
-        if mode == "skip":
-            return None
-        if mode == "marked":
-            return f"[Translation unavailable {source_lang.upper()} -> {target_lang.upper()}]\n{result.text}"
-        # Default: forward the original message without the noisy failure banner.
-        # The webhook username already includes the source channel language, e.g. (EN).
-        return result.text
+        return None
 
     async def _translate_and_dispatch(self, message: discord.Message, *, edited: bool) -> None:
         source_runtime = self.channels_by_id[message.channel.id]

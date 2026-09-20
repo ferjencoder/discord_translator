@@ -1,141 +1,78 @@
-# OZY Translator Bot - Hardened Edition
+# OZY Discord Translator — local Argos
 
-A 10-channel Discord translation bridge for OZY. Messages posted in one configured language channel are translated to the other nine channels and delivered through channel-specific Discord webhooks while preserving the source author's display name and avatar.
+Messages in the seven active language channels are translated to the other six
+and delivered through the existing Discord webhooks, using the author's name/avatar.
+Active languages: EN, ES, AR, DE, FR, NO, PT. Cebuano, Swedish and Russian are disabled;
+their saved channel IDs remain reserved so they cannot accidentally become reaction topics.
+No channels or roles are deleted.
 
-## Supported channels
+## Translation
 
-| Language | Code | Channel | Role | Webhook env |
-|---|---|---|---|---|
-| English | `en` | `#english` | `EN` | `WEBHOOK_EN` |
-| Spanish | `es` | `#español` | `ES` | `WEBHOOK_ES` |
-| French | `fr` | `#français` | `FR` | `WEBHOOK_FR` |
-| Portuguese | `pt` | `#português` | `PT` | `WEBHOOK_PT` |
-| Swedish | `sv` | `#svenska` | `SE` | `WEBHOOK_SV` |
-| German | `de` | `#deutsch` | `DE` | `WEBHOOK_DE` |
-| Bisaya / Cebuano | `ceb` | `#bisaya` | `PH` | `WEBHOOK_CEB` |
-| Russian | `ru` | `#русский` | `RU` | `WEBHOOK_RU` |
-| Arabic | `ar` | `#العربية` | `AR` | `WEBHOOK_AR` |
-| Norwegian | `no` | `#norsk` | `NO` | `WEBHOOK_NO` |
+- Argos Translate 1.11.0 runs locally on CPU; no Google/deep-translator adapter or translation API key.
+- Twelve directional models: English to/from Spanish, Arabic, German, French, Norwegian and Portuguese.
+  Discord code `no` maps to Argos `nb`. Other pairs run sequentially through English.
+- One inference at a time, int8 compute, one thread and beam/batch size 1.
+  Low-memory mode unloads each neural model after its leg, before loading the next.
+  This reduces retained models but does not guarantee a particular process RAM ceiling.
+- Protected code, URLs, mentions, emoji and game coordinates bypass the neural model.
+  Translating surrounding fragments separately can reduce fluency.
+- Failed translations are skipped. Originals are never reposted as a failure fallback.
+  An unsuccessful edit leaves the last successfully delivered copy unchanged.
+- A task timeout includes time waiting for the translation slot. Native inference cannot be killed
+  by asyncio: while an expired/cancelled call is still running, new requests are skipped.
+  If it never returns, restart the process.
+- Reaction sources use local `langdetect`; unsupported or low-confidence detections are skipped.
+  Short, mixed-language or slang messages can still be confidently misidentified.
 
-The configured Discord IDs remain in `settings.py`. The bot refuses to start if a webhook points to the wrong channel or guild.
+## Preserved Discord behavior
 
-## What changed from the original bot
+Existing guild/channel/webhook validation, author attribution, mention suppression, queues,
+attachment forwarding, reply context, chunking, edit/delete synchronization, deduplication,
+Discord delivery rate limits/retries/quarantine and SQLite mappings remain in place.
+Enable Message Content Intent in the Discord Developer Portal. The bot needs View Channel and
+Read Message History in source channels; webhooks post the automatic translations.
 
-### Security and configuration
+Topic reaction replies additionally need Send Messages and Send Messages in Threads.
+Configure `REACTION_CATEGORY_IDS` or `REACTION_CHANNEL_IDS`; see
+[topic setup](TOPIC_TRANSLATION_SETUP.md). Flags target only active languages.
+UK/US and Portugal/Brazil flags share their respective languages.
+Existing per-user limits, age limits and one-reply-per-language deduplication remain.
 
-- Requires `SERVER_ID` and refuses messages from any other guild.
-- Validates every webhook URL structurally before startup.
-- Fetches every webhook at startup and verifies that its actual Discord channel ID and guild match the expected configuration.
-- Rejects duplicate webhook IDs.
-- Uses `discord.AllowedMentions.none()` for all translated webhook messages, preventing replicated `@user`, `@role`, and similar pings.
-- `.env` remains ignored; `.env.example` contains placeholders only.
+`/translator-status` reports local provider activity, queue sizes, success/failure,
+latency, character counts and Discord delivery status. Retained telemetry can include
+earlier Google failures; no cloud cost projection is used.
 
-### Translation reliability
+## Local setup
 
-- Preserves the known source language instead of asking Google to auto-detect every short Discord message.
-- Protects URLs, code blocks, inline code, Discord mentions, channel mentions, timestamps, slash-command mentions, custom emoji, and Total Battle coordinates before translation.
-- Verifies protected placeholders survived translation before restoring them.
-- A failed automatic translation is logged and, by default, forwards only the original source text without the old noisy failure banner. This behavior is configurable.
-- Adds explicit HTTP connect/read timeouts around the `deep-translator` Google request.
-- Uses conservative provider throttling by default: one in-flight translation and a 1.5 second minimum gap between Google request starts.
-- Sends browser-like request headers. The second Google web endpoint is now a deferred fallback: it waits 10 seconds by default and then passes through the same request-start gate instead of firing immediately.
-- A detected HTTP 429 activates a 120-second global translation cooldown. All pending destination languages stop starting provider requests until that cooldown clears, and the 429 retry does not also use the normal short exponential backoff.
-- Automatic channel failures default to forwarding only the original text (the webhook username still shows the source language) instead of flooding channels with `[Translation unavailable ...]`.
+Use Python 3.12 and a virtual environment:
 
-### Translation telemetry and `/translator-status`
-
-- Every logical translation request is recorded in SQLite without storing chat text.
-- Metrics include source/target language, source character count, success/failure, retry count, final error class, 429 attempts, timeout attempts, and end-to-end translation latency.
-- `/translator-status` is a guild-only ephemeral command for server admins/manage-server users or configured leadership roles.
-- Default leadership role names are `Leader`, `Superior`, and `Superiors`; override with `TRANSLATOR_STATUS_ROLE_NAMES`.
-- The command shows current provider cooldown/queue state, 24-hour success rate, 429/timeouts, 30-day character usage, and a projected Google Cloud Translation cost at the current 24-hour traffic pace.
-- Metrics are retained for 90 days by default (`TRANSLATION_METRICS_RETENTION_DAYS`). They use the same SQLite file as message mappings, so persistence still depends on the host filesystem.
-- Cost assumptions are configuration only. Update `GOOGLE_CLOUD_FREE_CHARS_MONTHLY` and `GOOGLE_CLOUD_USD_PER_MILLION_CHARS` if provider pricing changes.
-
-### Ordering and lifecycle
-
-- Create, edit, and delete events enter one FIFO event queue.
-- The nine destination translation jobs are queued together, but provider concurrency/rate gates control how quickly Google is called. The safe default is serialized provider traffic. If any request receives 429, the same global gate pauses the remaining queued languages before another provider request can start.
-- The next source event is not processed until delivery of the current event finishes, preserving conversation ordering.
-- Edit events remove the old translated copies and post fresh translations marked `[Edited]`.
-- Delete events remove the translated copies.
-- Source-to-webhook message IDs are stored in SQLite. This survives process restarts only when the filesystem itself persists.
-- SQLite stores IDs only, not chat text.
-- Render free services use an ephemeral filesystem, so the SQLite mapping is lost on a Render restart, redeploy, or spin-down. For guaranteed cross-deploy edit/delete cleanup, move `MessageState` to Render Postgres/Key Value or attach a persistent disk on an eligible plan.
-- The old Flask thread, Gunicorn dependency, import-time server startup, and duplicate `on_ready()` keepalive tasks are gone.
-- Health endpoints `/` and `/healthz` run on `aiohttp` in the same asyncio process as Discord and bind to `PORT` **before Discord login**, so Render keeps the web service alive during Discord/Cloudflare startup backoff.
-
-### Discord delivery and media
-
-- Uses `discord.Webhook` instead of manually constructing webhook HTTP requests.
-- Uses `wait=True` so destination message IDs can be recorded.
-- Recreates `discord.File` objects on retries so a consumed file stream is never reused.
-- Discord webhook sends have both per-request and per-destination hard timeouts, so one blocked webhook cannot stall the single translation event worker indefinitely.
-- Discord `Retry-After` values are capped. Implausibly long values quarantine only the affected destination webhook instead of parking the shared webhook gate for hours.
-- Normal Discord attachments are re-uploaded when they fit configured size limits. Oversized or failed downloads fall back to links.
-- GIF/image/video embed URLs are deduplicated.
-- PNG/APNG/GIF stickers are re-uploaded. Lottie stickers fall back to a visible `[Sticker: name]` marker instead of claiming they were converted to PNG.
-- Message splitting prefers paragraphs/newlines/sentences/spaces and avoids splitting normal protected URLs, mentions, coordinates, and code blocks when possible.
-
-## Installation
-
-Python 3.11+ is recommended.
-
-```bash
+```text
 python -m venv .venv
-```
-
-Windows:
-
-```bat
-.venv\Scripts\activate
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
-copy .env.example .env
 ```
 
-Linux/macOS:
+Copy `.env.example` to `.env` and set `DISCORD_TOKEN`, `SERVER_ID` and
+`WEBHOOK_EN`, `WEBHOOK_ES`, `WEBHOOK_AR`, `WEBHOOK_DE`, `WEBHOOK_FR`,
+`WEBHOOK_NO`, `WEBHOOK_PT`. Keep tokens private.
 
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-Fill in `.env` with the real bot token, `SERVER_ID`, and all ten webhook URLs.
-
-## Discord bot settings
-
-In the Discord Developer Portal, enable the privileged **Message Content Intent** for the bot. The bot only requests the normal default intents plus message content.
-
-For each translation source channel, the bot member must be able to:
-
-- View Channel
-- Read Message History
-
-The channel webhooks perform destination posting.
-
-## Run locally
-
-```bash
+```text
+python install_argos_models.py
 python bot.py
 ```
 
-A successful startup performs three guards before normal operation:
+The installer does not require Discord credentials. It installs only missing required pairs,
+verifies all pairs exist and warms sentence splitters so their downloads occur at build time.
+It does not remove unrelated models already on disk. Runtime uses only explicit required pairs.
+Model downloads require internet and considerable disk space.
 
-1. environment/config validation
-2. webhook-to-channel validation
-3. guild/channel read-access validation
-
-If any required mapping is wrong, startup fails instead of forwarding messages somewhere unexpected.
-
-## Render deployment
-
-Use a **Web Service** if you want Render to require a bound HTTP port.
+## Render
 
 Build command:
 
 ```bash
-pip install -r requirements.txt
+pip install --index-url https://download.pytorch.org/whl/cpu torch && pip install -r requirements.txt && python install_argos_models.py
 ```
 
 Start command:
@@ -144,245 +81,73 @@ Start command:
 python bot.py
 ```
 
-Set the secrets/environment variables from `.env.example` in the Render dashboard. Do not upload the real `.env` file.
+The first build step selects the official CPU-only PyTorch distribution before installing
+Argos dependencies, avoiding unnecessary CUDA libraries on Render.
 
-`SELF_PING_ENABLED=true` keeps the previous self-ping behavior when `RENDER_EXTERNAL_URL` exists. Set it to `false` if your hosting tier does not need it.
-
-Recommended translation settings for the unofficial Google endpoint:
+Use these environment variables (also in `RENDER_TRANSLATION_SETTINGS.txt`):
 
 ```env
-DISCORD_STARTUP_429_INITIAL_BACKOFF_SECONDS=300
-DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS=3600
+PYTHON_VERSION=3.12.10
+ACTIVE_TRANSLATION_LANGS=en,es,ar,de,fr,no,pt
+ARGOS_DEVICE_TYPE=cpu
+ARGOS_COMPUTE_TYPE=int8
+ARGOS_INTER_THREADS=1
+ARGOS_INTRA_THREADS=1
+ARGOS_BATCH_SIZE=1
+ARGOS_BEAM_SIZE=1
+ARGOS_CHUNK_TYPE=MINISBD
+ARGOS_LOW_MEMORY=true
 TRANSLATION_CONCURRENCY=1
-TRANSLATION_START_INTERVAL_SECONDS=1.5
-TRANSLATION_RETRIES=2
-TRANSLATION_429_COOLDOWN_SECONDS=120
-TRANSLATION_FALLBACK_DELAY_SECONDS=10
-TRANSLATION_FAILURE_MODE=original
-TRANSLATION_METRICS_RETENTION_DAYS=90
-WEBHOOK_RETRIES=2
-WEBHOOK_START_INTERVAL_SECONDS=0.50
-WEBHOOK_429_COOLDOWN_SECONDS=10
-WEBHOOK_MAX_RETRY_AFTER_SECONDS=30
-WEBHOOK_QUARANTINE_SECONDS=300
-WEBHOOK_SEND_TIMEOUT_SECONDS=15
-WEBHOOK_DELIVERY_TIMEOUT_SECONDS=25
-TRANSLATOR_STATUS_ROLE_NAMES=Leader,Superior,Superiors
-GOOGLE_CLOUD_FREE_CHARS_MONTHLY=500000
-GOOGLE_CLOUD_USD_PER_MILLION_CHARS=20
+TRANSLATION_START_INTERVAL_SECONDS=0.05
+TRANSLATION_RETRIES=1
+TRANSLATION_TASK_TIMEOUT_SECONDS=90
+TRANSLATION_FAILURE_MODE=skip
 ```
 
-`TRANSLATION_FAILURE_MODE` supports `original`, `skip`, or `marked`. `original` is the default and avoids the noisy failure banner. Reaction-requested translations are not posted when the provider fails, because labeling untranslated source text as the requested language would be misleading.
+Keep existing Discord identity, active webhooks, delivery, reaction and state settings.
+Remove old `TRANSLATION_CONNECT_TIMEOUT_SECONDS`, `TRANSLATION_READ_TIMEOUT_SECONDS`,
+`TRANSLATION_429_COOLDOWN_SECONDS`, `TRANSLATION_FALLBACK_DELAY_SECONDS`, and `GOOGLE_CLOUD_*`.
+Discord startup and webhook 429 settings still apply.
 
-After deployment, run `/translator-status` in the OZY server. The reply is ephemeral. Access is allowed to Discord administrators, members with **Manage Server**, and members whose role names match `TRANSLATOR_STATUS_ROLE_NAMES`.
+Models default to project-local `data/argos/packages`; sentence splitters/cache/config
+also live under `data/argos`. Build and runtime must use identical asset paths and active
+languages. Do not set different `ARGOS_PACKAGES_DIR` or `XDG_*` overrides between them.
+Rebuild if changing languages. Only subsets of these seven languages (including EN) are accepted.
 
-## Important translation-provider limitation
+The existing health server listens on `0.0.0.0:$PORT` (default 10000).
+The existing optional self-ping is retained but is not an uptime guarantee.
+Render free services can sleep/restart, and runtime SQLite mappings can be lost with their
+ephemeral filesystem. See [Render free-service limits](https://render.com/docs/free).
+Do not upgrade a hosting plan without assessing the cost.
 
-`deep-translator`'s Google translator uses Google's public/mobile translation endpoint rather than a contracted Google Cloud Translation API. It is free and useful for this private bot, but it has no SLA and can be rate-limited or changed by Google.
+CPU latency, memory use, build size and translation quality need a real Render smoke test.
+Argos dependencies include heavyweight ML libraries even with MiniSBD selected.
+Unloading models does not mean all memory is returned to the OS. Test chat bursts, two-leg
+translations, reaction detection, edits and restarts on the actual service.
 
-The provider logic is isolated in `translator.py`. If reliability becomes more important than zero API cost, replace that module with an official provider such as Google Cloud Translation, DeepL API, or Azure Translator without changing the Discord routing architecture.
+Local verification on 2026-09-20: 40 unit tests passed, compile/dependency checks passed,
+and 20 synthetic translations completed with socket connections blocked after loop startup.
+All twelve directions, English pivots, one auto-detected reaction and protected text were
+exercised. Windows Python 3.12 peak working set reached 688 MiB; final working set was
+365 MiB and private committed memory reached about 1,478 MiB. These are desktop measurements,
+not Linux/Render measurements, and do not demonstrate that a 512 MB service is viable.
+Installed model/splitter assets occupied about 1.33 GiB, excluding Python dependencies.
+No live Discord messages were sent and no Render deployment was performed.
 
-Also remember that message text is sent to the selected external translation provider. Do not treat translated channels as an appropriate place for secrets that must never leave Discord/provider infrastructure.
-
-## Safe permission maintenance
-
-### Export current permissions
-
-```bash
-python export_permissions.py
-```
-
-The export includes guild, category, channel, role/member names, IDs, and allowed/denied overwrites.
-
-### Repair translation channel permissions
-
-Dry-run only:
-
-```bash
-python fix_permissions.py
-```
-
-Apply only after reviewing the dry-run:
-
-```bash
-python fix_permissions.py --apply --confirm OZY_FIX_TRANSLATION_PERMISSIONS
-```
-
-The script modifies only:
-
-- `@everyone`
-- `OZY Translator`
-- that channel's expected language role
-
-It deliberately leaves every unrelated role/member overwrite untouched.
-
-## Safe channel purge
-
-Dry-run two channels:
-
-```bash
-python clear_channels.py --channels en es
-```
-
-Actually purge them:
-
-```bash
-python clear_channels.py --channels en es --apply --confirm OZY_DELETE_TRANSLATIONS
-```
-
-Safety controls:
-
-- requires explicit language codes
-- verifies `SERVER_ID`
-- verifies category
-- verifies exact channel ID and channel name
-- dry-run by default
-- preserves pinned messages by default
-- default maximum of 5,000 deletions per channel
-- messages older than 14 days are deleted individually because Discord cannot bulk-delete them
-
-Use `--include-pinned` only when you really want pinned messages deleted.
-
-## Tests
-
-The included tests cover token protection, safe message splitting, and persistent message-ID mapping.
+## Verification
 
 ```bash
 python -m unittest discover -s tests -v
+python -m compileall -q .
+pip check
 ```
 
-## Files
+Unit tests mock neural output; they validate routing/configuration, model selection and cleanup,
+timeout/cancellation isolation, protected text, detection rejection, failure delivery,
+reaction flags, message state and Discord startup rate-limit handling.
+They do not establish model quality or Render resource suitability.
 
-- `bot.py` - Discord client, event ordering, media collection, webhook delivery, edit/delete propagation, health endpoint
-- `settings.py` - channel map and strict environment validation
-- `translator.py` - Google/deep-translator adapter, timeouts, throttling, retries, cooldown
-- `text_utils.py` - protected-token handling and Discord-safe chunking
-- `state.py` - SQLite automatic/reaction message mapping plus translation telemetry
-- `reaction_utils.py` - flag/language aliases and canonical labels
-- `TOPIC_TRANSLATION_SETUP.md` - quick setup for topic/category reaction translation
-- `clear_channels.py` - guarded purge utility
-- `fix_permissions.py` - guarded permission repair utility
-- `export_permissions.py` - permission audit export
-- `.env.example` - deployment template without secrets
-- `tests/` - local unit tests
-
-## Known limits
-
-- Edits are propagated by deleting the old translated copies and posting new `[Edited]` copies. Discord webhooks cannot move an edited translation back to its original chronological position after it was replaced.
-- If the process crashes after Discord accepted a webhook message but before its message ID was committed to SQLite, that one translated copy may not be tracked for later edit/delete cleanup. The window is very small but cannot be made transactionally atomic across Discord and SQLite.
-- An individual protected URL/code token longer than Discord's message limit still has to be split.
-- Translation quality and availability remain dependent on Google through `deep-translator` until an official translation API is configured.
-
-# Reaction-based translation for topic channels
-
-This build supports a second translation mode for normal topic channels so you do not need ten copies of `#war-room`, `#events`, `#strategy`, and similar channels.
-
-## How it works
-
-A member posts normally in any language. Another member reacts to that source message with a supported flag. The bot translates the source text into that language and posts a silent bot reply directly under the original message.
-
-Examples:
-
-- `🇬🇧` or `🇺🇸` -> English
-- `🇪🇸` -> Spanish
-- `🇫🇷` -> French
-- `🇵🇹` or `🇧🇷` -> Portuguese
-- `🇸🇪` -> Swedish
-- `🇩🇪` -> German
-- `🇵🇭` -> Bisaya
-- `🇷🇺` -> Russian
-- `🇸🇦` -> Arabic
-- `🇳🇴` -> Norwegian
-
-Country aliases intentionally deduplicate to the same target language. For example, `🇬🇧` and `🇺🇸` both request one English translation, never two.
-
-## Recommended setup: one topic category
-
-Create a Discord category such as:
-
-```text
-📚 OZY Topics
-  #war-room
-  #events
-  #strategy
-  #questions
-  #mercenary-exchange
-```
-
-Enable Discord Developer Mode, copy the **category ID**, and set:
-
-```env
-REACTION_CATEGORY_IDS=123456789012345678
-```
-
-Every normal text channel created later inside that category automatically supports flag translation. No bot restart/config edit is needed for each new topic channel as long as it remains in an allowed category.
-
-You can also allow individual channels outside those categories:
-
-```env
-REACTION_CHANNEL_IDS=234567890123456789,345678901234567890
-```
-
-Both lists may be used together. If both are blank, reaction translation is disabled.
-
-Dedicated `#english`, `#español`, etc. channels are explicitly excluded from reaction mode and continue using automatic 9-language fan-out.
-
-## Anti-spam / anti-clog controls
-
-Reaction translation has its own queue, so a slow requested translation does not block the automatic language-channel queue.
-
-Default protections:
-
-```env
-REACTION_QUEUE_SIZE=100
-REACTION_MAX_AGE_DAYS=7
-REACTION_MAX_TRANSLATIONS_PER_MESSAGE=5
-REACTION_MAX_SOURCE_CHARS=4000
-REACTION_USER_REQUESTS_PER_MINUTE=15
-SILENT_REACTION_TRANSLATIONS=true
-```
-
-Behavior:
-
-- one translation maximum per `(source message, target language)`
-- duplicate reactions are rejected before entering the queue
-- multiple country flags mapping to the same language deduplicate
-- maximum 5 different displayed translations per source message by default
-- a user may request at most 15 unique translations per minute by default
-- queue is bounded; overload drops new reaction jobs instead of consuming unlimited memory
-- old messages are ignored after 7 days by default
-- only configured channels/categories are eligible
-- bot messages and webhook messages are never translated by reaction
-- normal reactions such as 👍 ❤️ 😂 are ignored with zero translation API work
-- removing a flag does not delete an existing translation
-- translated replies use `AllowedMentions.none()` and are silent by default
-- all Google calls still pass through the same global concurrency, request-start spacing, retry, timeout, and 429 cooldown controls as automatic translation
-
-## Edits and deletes
-
-If an original topic message is edited, only languages that were already requested are translated again. Existing bot replies are edited **in place** whenever possible, so they do not jump to the bottom of the conversation.
-
-If the translation changes from one chunk to multiple chunks, only the new continuation replies are added. If it becomes shorter, obsolete continuation replies are deleted.
-
-If the original message is deleted, all tracked reaction-generated translations are deleted as well.
-
-Reaction translation mappings are stored in the same SQLite state database. As with automatic edit/delete mappings, Render's ephemeral filesystem means those mappings do not survive a service filesystem reset unless you use persistent storage.
-
-## Topic-channel bot permissions
-
-In reaction-enabled topic channels, the bot role needs:
-
-- View Channel
-- Read Message History
-- Send Messages
-- Send Messages in Threads if you use threads/forum posts
-
-It does not need permission to manage other users' messages. It only deletes/edits its own generated replies.
-
-## Why source language uses auto-detection here
-
-Dedicated language channels have a known source language from their channel. Topic channels do not: Spanish, English, German, etc. can all appear in the same channel. Reaction translation therefore uses source `auto` only for this mode, while the original 10 dedicated channels continue using their known source language.
-
-### Discord API startup 429 / Cloudflare 1015
-
-If Discord rate-limits the host IP before gateway login (for example Cloudflare Error 1015 on `GET /users/@me`), the bot no longer exits and triggers a Render restart loop. It keeps the process alive and retries login with exponential backoff starting at `DISCORD_STARTUP_429_INITIAL_BACKOFF_SECONDS`, capped by `DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS`. Non-429 startup errors still fail fast.
+Provider implementation: `translator.py`. Shared paths/languages: `argos_config.py`.
+Build installer: `install_argos_models.py`. Routing/delivery: `bot.py`.
+Historical hardening/patch reports describe earlier releases; this README and the Render
+settings file are the current deployment instructions.

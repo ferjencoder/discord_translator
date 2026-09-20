@@ -12,10 +12,12 @@ class ReactionUtilsTests(unittest.TestCase):
 
     def test_unknown_reaction_is_ignored(self):
         self.assertIsNone(language_for_emoji("👍"))
+        for flag in ("🇸🇪", "🇵🇭", "🇷🇺"):
+            self.assertIsNone(language_for_emoji(flag))
 
     def test_canonical_labels(self):
-        self.assertEqual(canonical_flag("ceb"), "🇵🇭")
-        self.assertEqual(label_for_language("ceb"), "Bisaya")
+        self.assertEqual(canonical_flag("no"), "🇳🇴")
+        self.assertEqual(label_for_language("no"), "Norwegian")
         self.assertEqual(label_for_language("xx"), "XX")
 
 

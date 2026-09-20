@@ -1,56 +1,40 @@
-Recommended Render environment values for OZY Translator
+Build command:
+pip install --index-url https://download.pytorch.org/whl/cpu torch && pip install -r requirements.txt && python install_argos_models.py
 
-DISCORD_STARTUP_429_INITIAL_BACKOFF_SECONDS=300
-DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS=3600
+Start command:
+python bot.py
 
+Environment:
+PYTHON_VERSION=3.12.10
+ACTIVE_TRANSLATION_LANGS=en,es,ar,de,fr,no,pt
+ARGOS_DEVICE_TYPE=cpu
+ARGOS_COMPUTE_TYPE=int8
+ARGOS_INTER_THREADS=1
+ARGOS_INTRA_THREADS=1
+ARGOS_BATCH_SIZE=1
+ARGOS_BEAM_SIZE=1
+ARGOS_CHUNK_TYPE=MINISBD
+ARGOS_LOW_MEMORY=true
 TRANSLATION_CONCURRENCY=1
-TRANSLATION_START_INTERVAL_SECONDS=1.5
-TRANSLATION_RETRIES=2
-TRANSLATION_CONNECT_TIMEOUT_SECONDS=5
-TRANSLATION_READ_TIMEOUT_SECONDS=15
-TRANSLATION_TASK_TIMEOUT_SECONDS=25
-TRANSLATION_429_COOLDOWN_SECONDS=1800
-TRANSLATION_FALLBACK_DELAY_SECONDS=10
+TRANSLATION_START_INTERVAL_SECONDS=0.05
+TRANSLATION_RETRIES=1
+TRANSLATION_TASK_TIMEOUT_SECONDS=90
 TRANSLATION_FAILURE_MODE=skip
 
-# /translator-status telemetry
-TRANSLATION_METRICS_RETENTION_DAYS=90
-TRANSLATOR_STATUS_ROLE_NAMES=Leader,Superior,Superiors
+Keep DISCORD_TOKEN, SERVER_ID, and WEBHOOK_EN/ES/AR/DE/FR/NO/PT.
+Keep existing Discord delivery, reaction-channel/category and state settings.
+Remove obsolete TRANSLATION_CONNECT_TIMEOUT_SECONDS, TRANSLATION_READ_TIMEOUT_SECONDS,
+TRANSLATION_429_COOLDOWN_SECONDS, TRANSLATION_FALLBACK_DELAY_SECONDS and GOOGLE_CLOUD_*.
+Inactive language webhooks can be removed. Discord webhook/startup 429 controls still apply.
 
-# Discord webhook delivery safeguards
-WEBHOOK_RETRIES=2
-WEBHOOK_START_INTERVAL_SECONDS=0.50
-WEBHOOK_429_COOLDOWN_SECONDS=10
-WEBHOOK_MAX_RETRY_AFTER_SECONDS=30
-WEBHOOK_QUARANTINE_SECONDS=300
-WEBHOOK_SEND_TIMEOUT_SECONDS=15
-WEBHOOK_DELIVERY_TIMEOUT_SECONDS=25
-GOOGLE_CLOUD_FREE_CHARS_MONTHLY=500000
-GOOGLE_CLOUD_USD_PER_MILLION_CHARS=20
+Build and runtime must use the same ACTIVE_TRANSLATION_LANGS and asset paths.
+Defaults store packages and sentence splitters beneath this project at data/argos.
+Do not override ARGOS_PACKAGES_DIR or XDG_* between build and start.
+The installer downloads exactly the missing required directional models (12 by default)
+and preloads sentence splitters. It never deletes unrelated existing models.
+Rebuild when changing active languages.
 
-Failure modes:
-- original: post the original source text without the noisy failure banner
-- skip: do not post a destination copy when translation fails
-- marked: preserve the old [Translation unavailable ...] banner
-
-Status command:
-- /translator-status
-- ephemeral
-- allowed for Administrator / Manage Server / configured leadership role names
-- tracks success rate, 429s, timeouts, character volume, queues, cooldown and estimated Cloud cost
-
-Important: telemetry is stored in STATE_DB. If the Render filesystem is ephemeral, metrics reset when that filesystem is replaced.
-
-Rate-limit behavior in this build:
-- every Google HTTP call, including fallback, passes through the same global start gate
-- TranslationNotFound / endpoint-parser failures wait before JSON fallback
-- HTTP 429 pauses all pending destination starts for the full cooldown
-- a 429 retry does not also use the old 1-10 second exponential backoff
-- the endpoint that returned 429 is retried after cooldown; it is not immediately bypassed
-
-Discord webhook behavior in this build:
-- a normal 429 respects Discord's Retry-After but never waits longer than WEBHOOK_MAX_RETRY_AFTER_SECONDS
-- a Retry-After above that cap is treated as pathological; only that destination webhook is quarantined and the other language webhooks continue
-- webhook.send itself is bounded by WEBHOOK_SEND_TIMEOUT_SECONDS
-- each destination delivery is bounded by WEBHOOK_DELIVERY_TIMEOUT_SECONDS
-- no Discord 429 can set the shared webhook gate to an hours-long delay
+A free Render service may sleep/restart; self-ping is not an uptime guarantee.
+RAM and CPU suitability must be measured on Render. No paid plan is required by this code.
+Native inference cannot be interrupted; after timeout, further jobs are skipped until
+it finishes. A permanently stuck native call requires a process restart.

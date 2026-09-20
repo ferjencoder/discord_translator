@@ -1,6 +1,6 @@
 aiohttp==3.12.15
-beautifulsoup4==4.13.4
-deep-translator==1.11.4
+argostranslate==1.11.0
 discord.py==2.7.1
+langdetect==1.0.9
+minisbd==0.9.5
 python-dotenv==1.1.1
-requests==2.32.4

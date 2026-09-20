@@ -17,10 +17,7 @@ FLAG_LANGUAGES: dict[str, ReactionLanguage] = {
     "🇫🇷": ReactionLanguage("fr", "French"),
     "🇵🇹": ReactionLanguage("pt", "Portuguese"),
     "🇧🇷": ReactionLanguage("pt", "Portuguese"),
-    "🇸🇪": ReactionLanguage("sv", "Swedish"),
     "🇩🇪": ReactionLanguage("de", "German"),
-    "🇵🇭": ReactionLanguage("ceb", "Bisaya"),
-    "🇷🇺": ReactionLanguage("ru", "Russian"),
     "🇸🇦": ReactionLanguage("ar", "Arabic"),
     "🇳🇴": ReactionLanguage("no", "Norwegian"),
 }
@@ -31,10 +28,7 @@ LANG_FLAGS: dict[str, str] = {
     "es": "🇪🇸",
     "fr": "🇫🇷",
     "pt": "🇵🇹",
-    "sv": "🇸🇪",
     "de": "🇩🇪",
-    "ceb": "🇵🇭",
-    "ru": "🇷🇺",
     "ar": "🇸🇦",
     "no": "🇳🇴",
 }

@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
+from argos_config import active_languages
 
 load_dotenv()
 
@@ -153,6 +154,7 @@ class Settings:
     discord_token: str
     server_id: int
     channels: tuple[RuntimeChannel, ...]
+    active_languages: tuple[str, ...]
     port: int
     render_external_url: str | None
     self_ping_enabled: bool
@@ -163,16 +165,10 @@ class Settings:
     translation_concurrency: int
     translation_start_interval_seconds: float
     translation_retries: int
-    translation_connect_timeout_seconds: float
-    translation_read_timeout_seconds: float
     translation_task_timeout_seconds: float
-    translation_429_cooldown_seconds: float
-    translation_fallback_delay_seconds: float
     translation_failure_mode: str
     translation_metrics_retention_days: int
     translator_status_role_names: frozenset[str]
-    google_cloud_free_chars_monthly: int
-    google_cloud_usd_per_million_chars: float
     webhook_retries: int
     webhook_start_interval_seconds: float
     webhook_429_cooldown_seconds: float
@@ -211,8 +207,16 @@ def load_identity() -> tuple[str, int]:
 def load_settings() -> Settings:
     token, server_id = load_identity()
 
+    try:
+        languages = active_languages()
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if _env_int('TRANSLATION_CONCURRENCY', 1, 1) != 1:
+        raise ConfigError('TRANSLATION_CONCURRENCY must be 1 for local Argos')
     channels: list[RuntimeChannel] = []
     for spec in CHANNEL_SPECS:
+        if spec.lang not in languages:
+            continue
         url = validate_webhook_url(_required(spec.webhook_env), spec.webhook_env)
         channels.append(RuntimeChannel(spec=spec, webhook_url=url))
 
@@ -225,6 +229,7 @@ def load_settings() -> Settings:
         discord_token=token,
         server_id=server_id,
         channels=tuple(channels),
+        active_languages=languages,
         port=_env_int("PORT", 10000, 1),
         render_external_url=render_url,
         self_ping_enabled=_env_bool("SELF_PING_ENABLED", self_ping_default),
@@ -236,31 +241,18 @@ def load_settings() -> Settings:
         discord_startup_429_max_backoff_seconds=_env_float(
             "DISCORD_STARTUP_429_MAX_BACKOFF_SECONDS", 3600.0, 1.0
         ),
-        # The translator fans one source message out to nine destinations. The old
-        # concurrency=3 / 200ms defaults created burst traffic against an unofficial
-        # Google endpoint. These stricter defaults deliberately favor reliability over
-        # speed and defer endpoint fallback instead of doubling a failed request.
+        # Serialize local neural inference to limit memory.
         translation_concurrency=_env_int("TRANSLATION_CONCURRENCY", 1, 1),
-        translation_start_interval_seconds=_env_float("TRANSLATION_START_INTERVAL_SECONDS", 1.5, 0.0),
-        translation_retries=_env_int("TRANSLATION_RETRIES", 2, 1),
-        translation_connect_timeout_seconds=_env_float("TRANSLATION_CONNECT_TIMEOUT_SECONDS", 5.0, 0.1),
-        translation_read_timeout_seconds=_env_float("TRANSLATION_READ_TIMEOUT_SECONDS", 15.0, 0.1),
-        translation_task_timeout_seconds=_env_float("TRANSLATION_TASK_TIMEOUT_SECONDS", 25.0, 1.0),
-        translation_429_cooldown_seconds=_env_float("TRANSLATION_429_COOLDOWN_SECONDS", 1800.0, 1.0),
-        translation_fallback_delay_seconds=_env_float(
-            "TRANSLATION_FALLBACK_DELAY_SECONDS", 10.0, 0.0
-        ),
+        translation_start_interval_seconds=_env_float("TRANSLATION_START_INTERVAL_SECONDS", 0.05, 0.0),
+        translation_retries=_env_int("TRANSLATION_RETRIES", 1, 1),
+        translation_task_timeout_seconds=_env_float("TRANSLATION_TASK_TIMEOUT_SECONDS", 90.0, 1.0),
         translation_failure_mode=_env_choice(
             "TRANSLATION_FAILURE_MODE",
             "skip",
-            {"original", "skip", "marked"},
+            {"skip"},
         ),
         translation_metrics_retention_days=_env_int("TRANSLATION_METRICS_RETENTION_DAYS", 90, 1),
         translator_status_role_names=_env_name_set("TRANSLATOR_STATUS_ROLE_NAMES", "Leader,Superior,Superiors"),
-        google_cloud_free_chars_monthly=_env_int("GOOGLE_CLOUD_FREE_CHARS_MONTHLY", 500000, 0),
-        google_cloud_usd_per_million_chars=_env_float(
-            "GOOGLE_CLOUD_USD_PER_MILLION_CHARS", 20.0, 0.0
-        ),
         webhook_retries=_env_int("WEBHOOK_RETRIES", 2, 1),
         webhook_start_interval_seconds=_env_float("WEBHOOK_START_INTERVAL_SECONDS", 0.50, 0.0),
         webhook_429_cooldown_seconds=_env_float("WEBHOOK_429_COOLDOWN_SECONDS", 10.0, 1.0),

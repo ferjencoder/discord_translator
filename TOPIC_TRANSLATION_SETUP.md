@@ -13,7 +13,7 @@ Create one category for topic channels, for example:
   #mercenary-exchange
 ```
 
-Do not create ten language copies of these channels.
+Do not create separate language copies of these channels.
 
 ## 1. Copy the category ID
 
@@ -79,10 +79,7 @@ If somebody reacts `🇩🇪`, one German reply is added.
 | 🇪🇸 | Spanish |
 | 🇫🇷 | French |
 | 🇵🇹 / 🇧🇷 | Portuguese |
-| 🇸🇪 | Swedish |
 | 🇩🇪 | German |
-| 🇵🇭 | Bisaya |
-| 🇷🇺 | Russian |
 | 🇸🇦 | Arabic |
 | 🇳🇴 | Norwegian |
 
@@ -93,6 +90,8 @@ If somebody reacts `🇩🇪`, one German reply is added.
 - source message must be no older than 7 days
 - reaction queue holds at most 100 pending jobs
 - translations are silent and cannot generate mention pings
-- duplicate requests never reach Google
+- duplicate requests do not run another local translation
 
 Change the limits in Render only if actual usage justifies it.
+
+Source language is detected locally with langdetect. Unsupported or uncertain detections are skipped. Short slang can still be misidentified. Active targets: EN, ES, AR, DE, FR, NO, PT.
