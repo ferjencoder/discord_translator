@@ -271,6 +271,8 @@ class TranslatorBot(discord.Client):
         started = time.perf_counter()
         result = await self.translator.translate(text, source_lang, target_lang)
         duration_ms = int((time.perf_counter() - started) * 1000)
+        log.info("Translation completed %s->%s ok=%s duration=%.2fs error=%s",
+                 source_lang, target_lang, result.ok, duration_ms / 1000, result.error)
         try:
             await self.state.record_translation_metric(
                 source_message_id=source_message_id,
@@ -973,19 +975,15 @@ class TranslatorBot(discord.Client):
                 result = TranslationResult(text="", ok=True, attempts=0)
             return target, result
 
-        translated = await asyncio.gather(*(translate_target(target) for target in target_runtimes))
-
         username = f"{message.author.display_name} ({source_lang.upper()})"
         if len(username) > 80:
             username = username[:79].rstrip() + "…"
         avatar_url = str(message.author.display_avatar.url)
 
-        # Send destination copies concurrently after translation work is complete.
-        # Translation provider traffic itself is controlled by TranslationService.
+        # Deliver each result immediately; a slow model must not hold ready copies.
+        # Translation inference remains serialized by TranslationService.
         # Every destination has a hard end-to-end timeout so a Discord webhook cannot
         # stall the single event worker and block later source messages.
-        deliveries = []
-
         async def deliver_target(target: RuntimeChannel, output: str) -> None:
             try:
                 await asyncio.wait_for(
@@ -1008,14 +1006,22 @@ class TranslatorBot(discord.Client):
                     target.spec.lang.upper(),
                 )
 
-        for target, result in translated:
+        async def translate_and_deliver(target: RuntimeChannel) -> None:
+            target, result = await translate_target(target)
             output = self._translation_output(result, source_lang, target.spec.lang)
             if output is None:
-                continue
-            deliveries.append(deliver_target(target, output))
+                return
+            await deliver_target(target, output)
 
-        if deliveries:
-            await asyncio.gather(*deliveries)
+        jobs = [asyncio.create_task(translate_and_deliver(target)) for target in target_runtimes]
+        try:
+            await asyncio.gather(*jobs)
+        finally:
+            # Do not leave orphan deliveries racing the next source event on failure.
+            for job in jobs:
+                if not job.done():
+                    job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
 
     async def _send_translation(
         self,
@@ -1329,6 +1335,7 @@ async def _start_service_health_server(
         queue_depth = 0
         reaction_queue_depth = 0
         translation_cooldown = 0.0
+        translation_runtime = {}
         if client is not None:
             event_queue = getattr(client, "event_queue", None)
             reaction_queue = getattr(client, "reaction_queue", None)
@@ -1339,6 +1346,7 @@ async def _start_service_health_server(
             translator = getattr(client, "translator", None)
             if translator is not None:
                 try:
+                    translation_runtime = translator.runtime_status()
                     translation_cooldown = round(
                         float(translator.runtime_status()["cooldown_remaining_seconds"]), 1
                     )
@@ -1347,13 +1355,18 @@ async def _start_service_health_server(
 
         payload = {
             "status": "ok",
-            "service_state": runtime.get("service_state", "starting"),
+            "service_state": "operational" if discord_ready else runtime.get("service_state", "starting"),
             "discord_ready": discord_ready,
             "queue_depth": queue_depth,
             "reaction_queue_depth": reaction_queue_depth,
             "translation_cooldown_seconds": translation_cooldown,
             "startup_retry_seconds": runtime.get("startup_retry_seconds", 0),
             "startup_error": runtime.get("startup_error"),
+            "translation": translation_runtime,
+            "automatic_worker_running": bool(client and getattr(client, "worker_task", None)
+                                             and not client.worker_task.done()),
+            "reaction_worker_running": bool(client and getattr(client, "reaction_worker_task", None)
+                                            and not client.reaction_worker_task.done()),
             "utc": datetime.now(timezone.utc).isoformat(),
         }
         return web.json_response(payload)

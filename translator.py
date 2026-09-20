@@ -106,6 +106,8 @@ class TranslationService:
         self._task_timeout = task_timeout_seconds
         self._next_start = 0.0
         self._running = None
+        self._running_since = None
+        self._last_result = None
 
     def _translate_sync(self, text, source, target):
         # Small neural models rewrite random placeholders. Keep protected spans
@@ -137,6 +139,7 @@ class TranslationService:
                 raise ArgosBusy("Previous native inference is still running after timeout/cancellation")
             await asyncio.sleep(max(0, self._next_start - time.monotonic()))
             self._next_start = time.monotonic() + self._start_interval
+            self._running_since = time.monotonic()
             self._running = asyncio.create_task(asyncio.to_thread(self._translate_sync, text, source, target))
             self._running.add_done_callback(self._consume_background_error)
             return await asyncio.shield(self._running)
@@ -152,8 +155,10 @@ class TranslationService:
         for attempt in range(1, self._retries + 1):
             try:
                 translated = await asyncio.wait_for(self._run(text, source, target), self._task_timeout)
+                self._last_result = {"ok": True, "source": source, "target": target, "error": None}
                 return TranslationResult(translated, True, attempt)
             except asyncio.TimeoutError:
+                self._last_result = {"ok": False, "source": source, "target": target, "error": "TimeoutError"}
                 return TranslationResult("", False, attempt, "TimeoutError", timeout_errors=1)
             except Exception as exc:
                 error = type(exc).__name__
@@ -166,9 +171,14 @@ class TranslationService:
                     detail = " > ".join(f"{frame.filename}:{frame.lineno} ({frame.name})"
                                         for frame in frames[-4:])
                 log.warning("Local translation %s->%s failed (%s): %s", source, target, error, detail)
+        self._last_result = {"ok": False, "source": source, "target": target, "error": error}
         return TranslationResult("", False, attempt, error)
 
     def runtime_status(self):
+        busy = bool(self._running and not self._running.done())
         return {"provider": "Argos Translate (local CPU)",
                 "cooldown_remaining_seconds": 0.0,
-                "busy": bool(self._running and not self._running.done())}
+                "busy": busy,
+                "inference_elapsed_seconds": round(time.monotonic() - self._running_since, 1)
+                if busy and self._running_since is not None else 0.0,
+                "last_result": self._last_result}
