@@ -7,10 +7,12 @@ from install_argos_models import install_models
 
 
 class ModelInstallerTests(unittest.TestCase):
-    def test_default_is_exactly_twelve_directional_models(self):
+    def test_default_is_exactly_fourteen_directional_models(self):
         with patch.dict(os.environ, {}, clear=True):
             pairs = required_pairs(active_languages())
-        self.assertEqual(len(pairs), 12)
+        self.assertEqual(len(pairs), 14)
+        self.assertIn(("en", "it"), pairs)
+        self.assertIn(("it", "en"), pairs)
         self.assertIn(("en", "nb"), pairs)
         self.assertIn(("nb", "en"), pairs)
         self.assertFalse(any(code in {"ceb", "sv", "ru", "no"} for pair in pairs for code in pair))

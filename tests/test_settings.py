@@ -23,7 +23,7 @@ class SettingsTests(unittest.TestCase):
         with patch.dict(os.environ, self._env(), clear=True):
             settings = load_settings()
         self.assertEqual(settings.server_id, 123456789012345678)
-        self.assertEqual(len(settings.channels), 7)
+        self.assertEqual(len(settings.channels), 8)
         self.assertFalse(settings.self_ping_enabled)
         self.assertEqual(settings.reaction_channel_ids, frozenset())
         self.assertEqual(settings.reaction_category_ids, frozenset())
@@ -49,11 +49,11 @@ class SettingsTests(unittest.TestCase):
 
     def test_inactive_webhooks_are_not_required(self):
         env = self._env()
-        for code in ("SV", "CEB", "RU"):
+        for code in ("SV", "RU"):
             del env["WEBHOOK_" + code]
         with patch.dict(os.environ, env, clear=True):
             settings = load_settings()
-        self.assertEqual({c.spec.lang for c in settings.channels}, {"en", "es", "ar", "de", "fr", "no", "pt"})
+        self.assertEqual({c.spec.lang for c in settings.channels}, {"en", "es", "ar", "de", "fr", "no", "pt", "it"})
 
     def test_subset_requires_only_its_webhooks(self):
         env = self._env()

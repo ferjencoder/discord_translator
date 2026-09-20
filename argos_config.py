@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 
-SUPPORTED_LANGUAGES = ("en", "es", "ar", "de", "fr", "no", "pt")
+SUPPORTED_LANGUAGES = ("en", "es", "ar", "de", "fr", "no", "pt", "it")
 
 
 def active_languages():
@@ -10,7 +10,7 @@ def active_languages():
         "ACTIVE_TRANSLATION_LANGS", ",".join(SUPPORTED_LANGUAGES)
     ).split(",") if p.strip()))
     if not values or "en" not in values or set(values) - set(SUPPORTED_LANGUAGES):
-        raise ValueError("ACTIVE_TRANSLATION_LANGS must include en and use only en,es,ar,de,fr,no,pt")
+        raise ValueError("ACTIVE_TRANSLATION_LANGS must include en and use only en,es,ar,de,fr,no,pt,it")
     return values
 
 

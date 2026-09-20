@@ -15,6 +15,12 @@ class ReactionUtilsTests(unittest.TestCase):
         for flag in ("🇸🇪", "🇵🇭", "🇷🇺"):
             self.assertIsNone(language_for_emoji(flag))
 
+    def test_italian_replaces_cebuano(self):
+        self.assertEqual(language_for_emoji("🇮🇹").lang, "it")
+        self.assertEqual(canonical_flag("it"), "🇮🇹")
+        self.assertEqual(label_for_language("it"), "Italian")
+        self.assertIsNone(language_for_emoji("🇵🇭"))
+
     def test_canonical_labels(self):
         self.assertEqual(canonical_flag("no"), "🇳🇴")
         self.assertEqual(label_for_language("no"), "Norwegian")

@@ -80,6 +80,7 @@ If somebody reacts `🇩🇪`, one German reply is added.
 | 🇫🇷 | French |
 | 🇵🇹 / 🇧🇷 | Portuguese |
 | 🇩🇪 | German |
+| 🇮🇹 | Italian |
 | 🇸🇦 | Arabic |
 | 🇳🇴 | Norwegian |
 
@@ -94,4 +95,4 @@ If somebody reacts `🇩🇪`, one German reply is added.
 
 Change the limits in Render only if actual usage justifies it.
 
-Source language is detected locally with langdetect. Unsupported or uncertain detections are skipped. Short slang can still be misidentified. Active targets: EN, ES, AR, DE, FR, NO, PT.
+Source language is detected locally with langdetect. Unsupported or uncertain detections are skipped. Short slang can still be misidentified. Active targets: EN, ES, AR, DE, FR, NO, PT, IT.

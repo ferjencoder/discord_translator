@@ -6,7 +6,7 @@ python bot.py
 
 Environment:
 PYTHON_VERSION=3.12.10
-ACTIVE_TRANSLATION_LANGS=en,es,ar,de,fr,no,pt
+ACTIVE_TRANSLATION_LANGS=en,es,ar,de,fr,no,pt,it
 ARGOS_DEVICE_TYPE=cpu
 ARGOS_COMPUTE_TYPE=int8
 ARGOS_INTER_THREADS=1
@@ -21,7 +21,7 @@ TRANSLATION_RETRIES=1
 TRANSLATION_TASK_TIMEOUT_SECONDS=90
 TRANSLATION_FAILURE_MODE=skip
 
-Keep DISCORD_TOKEN, SERVER_ID, and WEBHOOK_EN/ES/AR/DE/FR/NO/PT.
+Keep DISCORD_TOKEN, SERVER_ID, and WEBHOOK_EN/ES/AR/DE/FR/NO/PT/IT.
 Keep existing Discord delivery, reaction-channel/category and state settings.
 Remove obsolete TRANSLATION_CONNECT_TIMEOUT_SECONDS, TRANSLATION_READ_TIMEOUT_SECONDS,
 TRANSLATION_429_COOLDOWN_SECONDS, TRANSLATION_FALLBACK_DELAY_SECONDS and GOOGLE_CLOUD_*.
@@ -30,7 +30,7 @@ Inactive language webhooks can be removed. Discord webhook/startup 429 controls 
 Build and runtime must use the same ACTIVE_TRANSLATION_LANGS and asset paths.
 Defaults store packages and sentence splitters beneath this project at data/argos.
 Do not override ARGOS_PACKAGES_DIR or XDG_* between build and start.
-The installer downloads exactly the missing required directional models (12 by default)
+The installer downloads exactly the missing required directional models (14 by default)
 and preloads sentence splitters. It never deletes unrelated existing models.
 Rebuild when changing active languages.
 

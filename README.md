@@ -1,15 +1,15 @@
 # OZY Discord Translator — local Argos
 
-Messages in the seven active language channels are translated to the other six
+Messages in the eight active language channels are translated to the other seven
 and delivered through the existing Discord webhooks, using the author's name/avatar.
-Active languages: EN, ES, AR, DE, FR, NO, PT. Cebuano, Swedish and Russian are disabled;
-their saved channel IDs remain reserved so they cannot accidentally become reaction topics.
+Active languages: EN, ES, AR, DE, FR, NO, PT, IT. Cebuano, Swedish and Russian are disabled;
+Swedish/Russian channel IDs remain reserved. The former Cebuano channel is now Italian.
 No channels or roles are deleted.
 
 ## Translation
 
 - Argos Translate 1.11.0 runs locally on CPU; no Google/deep-translator adapter or translation API key.
-- Twelve directional models: English to/from Spanish, Arabic, German, French, Norwegian and Portuguese.
+- Fourteen directional models: English to/from Spanish, Arabic, German, French, Norwegian, Portuguese and Italian.
   Discord code `no` maps to Argos `nb`. Other pairs run sequentially through English.
 - One inference at a time, int8 compute, one thread and beam/batch size 1.
   Low-memory mode unloads each neural model after its leg, before loading the next.
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and set `DISCORD_TOKEN`, `SERVER_ID` and
 `WEBHOOK_EN`, `WEBHOOK_ES`, `WEBHOOK_AR`, `WEBHOOK_DE`, `WEBHOOK_FR`,
-`WEBHOOK_NO`, `WEBHOOK_PT`. Keep tokens private.
+`WEBHOOK_NO`, `WEBHOOK_PT`, `WEBHOOK_IT`. Keep tokens private.
 
 ```text
 python install_argos_models.py
@@ -88,7 +88,7 @@ Use these environment variables (also in `RENDER_TRANSLATION_SETTINGS.txt`):
 
 ```env
 PYTHON_VERSION=3.12.10
-ACTIVE_TRANSLATION_LANGS=en,es,ar,de,fr,no,pt
+ACTIVE_TRANSLATION_LANGS=en,es,ar,de,fr,no,pt,it
 ARGOS_DEVICE_TYPE=cpu
 ARGOS_COMPUTE_TYPE=int8
 ARGOS_INTER_THREADS=1
@@ -104,7 +104,7 @@ TRANSLATION_TASK_TIMEOUT_SECONDS=90
 TRANSLATION_FAILURE_MODE=skip
 ```
 
-Keep existing Discord identity, active webhooks, delivery, reaction and state settings.
+Keep existing Discord identity, active webhooks (including WEBHOOK_IT), delivery, reaction and state settings.
 Remove old `TRANSLATION_CONNECT_TIMEOUT_SECONDS`, `TRANSLATION_READ_TIMEOUT_SECONDS`,
 `TRANSLATION_429_COOLDOWN_SECONDS`, `TRANSLATION_FALLBACK_DELAY_SECONDS`, and `GOOGLE_CLOUD_*`.
 Discord startup and webhook 429 settings still apply.
@@ -112,7 +112,7 @@ Discord startup and webhook 429 settings still apply.
 Models default to project-local `data/argos/packages`; sentence splitters/cache/config
 also live under `data/argos`. Build and runtime must use identical asset paths and active
 languages. Do not set different `ARGOS_PACKAGES_DIR` or `XDG_*` overrides between them.
-Rebuild if changing languages. Only subsets of these seven languages (including EN) are accepted.
+Rebuild if changing languages. Only subsets of these eight languages (including EN) are accepted.
 
 The existing health server listens on `0.0.0.0:$PORT` (default 10000).
 The existing optional self-ping is retained but is not an uptime guarantee.
@@ -151,3 +151,5 @@ Provider implementation: `translator.py`. Shared paths/languages: `argos_config.
 Build installer: `install_argos_models.py`. Routing/delivery: `bot.py`.
 Historical hardening/patch reports describe earlier releases; this README and the Render
 settings file are the current deployment instructions.
+
+Italian migration: channel 1536508734530920570 is #italiano. Rename the old WEBHOOK_CEB environment key to WEBHOOK_IT, retaining its verified URL. Include it in ACTIVE_TRANSLATION_LANGS and rebuild to install en->it and it->en. Restart running bot processes to activate the new configuration.

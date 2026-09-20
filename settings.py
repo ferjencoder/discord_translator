@@ -32,7 +32,7 @@ CHANNEL_SPECS: tuple[ChannelSpec, ...] = (
     ChannelSpec("pt", "Portuguese", 1536510376617967616, "português",  "PT", "WEBHOOK_PT"),
     ChannelSpec("sv", "Swedish",    1536510464144441515, "svenska",    "SE", "WEBHOOK_SV"),
     ChannelSpec("de", "German",     1536508684081827880, "deutsch",    "DE", "WEBHOOK_DE"),
-    ChannelSpec("ceb", "Bisaya",    1536508734530920570, "bisaya",     "PH", "WEBHOOK_CEB"),
+    ChannelSpec("it", "Italian",    1536508734530920570, "italiano",   "IT", "WEBHOOK_IT"),
     ChannelSpec("ru", "Russian",    1538166128017412096, "русский",    "RU", "WEBHOOK_RU"),
     ChannelSpec("ar", "Arabic",     1538166161873567794, "العربية",    "AR", "WEBHOOK_AR"),
     ChannelSpec("no", "Norwegian",  1538637390149587025, "norsk",      "NO", "WEBHOOK_NO"),
