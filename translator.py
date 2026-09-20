@@ -6,23 +6,23 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from pathlib import Path
+import traceback
+from check_argos_models import MissingArgosModel, MissingSentenceModel, sentence_model_path
 from argos_config import active_languages, configure_argos, model_code
 from text_utils import PROTECTED_PATTERN
 
 log = logging.getLogger(__name__)
 
 
+class ArgosBusy(RuntimeError):
+    pass
+
+
 def require_local_sentence_model(translation):
     """Resolve MiniSBD to an existing file so runtime cannot download a model."""
-    from minisbd import SBDetect, models
+    from minisbd import SBDetect
     detector = translation.sentencizer
-    language = detector.lang
-    filename = models.MODELS.get(language)
-    path = Path(models.cache_dir) / filename if filename else Path(language)
-    if not path.is_file():
-        raise RuntimeError("Missing sentence model; run install_argos_models.py during build")
-    detector.lang = str(path.resolve())
+    detector.lang = str(sentence_model_path(detector))
     # Argos's default MiniSBD loader doesn't forward its thread settings.
     detector.detector = SBDetect(detector.lang, use_gpu=False, max_threads=1)
 
@@ -56,13 +56,14 @@ class ArgosBackend:
 
     def _leg(self, text, source, target):
         from argostranslate import package, translate
+        logging.getLogger("argostranslate.utils").setLevel(logging.WARNING)
         pair = (model_code(source), model_code(target))
         translation = self._cached.get(pair)
         if translation is None:
             pkg = next((p for p in package.get_installed_packages()
                         if (p.from_code, p.to_code) == pair), None)
             if pkg is None:
-                raise RuntimeError(f"Missing Argos model: {pair[0]}->{pair[1]}")
+                raise MissingArgosModel(f"Missing Argos model: {pair[0]}->{pair[1]}; run install_argos_models.py during build")
             # Avoid the global graph/cache: construct only the requested model.
             translation = translate.PackageTranslation(
                 translate.Language(pkg.from_code, pkg.from_name),
@@ -133,7 +134,7 @@ class TranslationService:
             if self._running is not None and not self._running.done():
                 # Native inference survives timeout/cancellation. Drop new work
                 # until it ends rather than queueing more threads/models.
-                raise RuntimeError("ArgosBusy")
+                raise ArgosBusy("Previous native inference is still running after timeout/cancellation")
             await asyncio.sleep(max(0, self._next_start - time.monotonic()))
             self._next_start = time.monotonic() + self._start_interval
             self._running = asyncio.create_task(asyncio.to_thread(self._translate_sync, text, source, target))
@@ -156,7 +157,15 @@ class TranslationService:
                 return TranslationResult("", False, attempt, "TimeoutError", timeout_errors=1)
             except Exception as exc:
                 error = type(exc).__name__
-                log.warning("Local translation %s->%s failed (%s)", source, target, error)
+                if isinstance(exc, (MissingArgosModel, MissingSentenceModel, ArgosBusy)):
+                    detail = str(exc)  # Our messages contain only paths/codes, never chat.
+                else:
+                    # Stack locations aid diagnosis without logging third-party exception
+                    # messages or frame locals, which can contain source chat text.
+                    frames = traceback.extract_tb(exc.__traceback__)
+                    detail = " > ".join(f"{frame.filename}:{frame.lineno} ({frame.name})"
+                                        for frame in frames[-4:])
+                log.warning("Local translation %s->%s failed (%s): %s", source, target, error, detail)
         return TranslationResult("", False, attempt, error)
 
     def runtime_status(self):

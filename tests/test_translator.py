@@ -171,7 +171,7 @@ class BackendTests(unittest.TestCase):
     def test_missing_sentence_model_is_rejected_without_download(self):
         from translator import require_local_sentence_model
         translation = SimpleNamespace(sentencizer=SimpleNamespace(lang="en"))
-        with patch("translator.Path.is_file", return_value=False), patch(
+        with patch("check_argos_models.Path.is_file", return_value=False), patch(
             "minisbd.models.get_model_file") as download:
             with self.assertRaises(RuntimeError):
                 require_local_sentence_model(translation)

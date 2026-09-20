@@ -19,6 +19,7 @@ from state import MessageState
 from startup_retry import is_cloudflare_1015, retry_after_from_exception
 from text_utils import chunk_text, clean_preview
 from translator import TranslationResult, TranslationService
+from check_argos_models import validate_models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,6 +117,9 @@ class TranslatorBot(discord.Client):
         self.startup_error: BaseException | None = None
 
     async def setup_hook(self) -> None:
+        # Health port is already bound. Check local assets before starting workers
+        # or declaring the bot operational; this check never downloads models.
+        await asyncio.to_thread(validate_models)
         self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
         await self.state.initialize()
         removed = await self.state.cleanup(self.settings.state_retention_days)
