@@ -24,3 +24,5 @@ data/*.sqlite3-wal
 
 # Build-time Argos assets
 data/argos/
+data/logs/
+data/local-runner.lock

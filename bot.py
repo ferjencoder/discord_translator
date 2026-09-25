@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import random
 import time
 from collections import defaultdict, deque
@@ -1388,7 +1389,7 @@ async def _start_service_health_server(
     app.router.add_get("/healthz", health)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", settings.port)
+    site = web.TCPSite(runner, os.getenv("HEALTH_BIND_HOST", "0.0.0.0"), settings.port)
     await site.start()
     log.info("Health server listening on port %d before Discord login", settings.port)
     return runner

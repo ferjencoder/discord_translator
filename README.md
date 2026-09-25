@@ -8,6 +8,38 @@ No channels or roles are deleted.
 
 ## Translation
 
+### Running on this Windows PC
+
+Use the existing Discord bot credentials. Suspend the Render service before starting
+the local copy; the two hosts must not process the same messages concurrently.
+
+From this project directory, validate without connecting to Discord:
+
+```powershell
+.\.venv\Scripts\python.exe local_runner.py --check
+```
+
+`local_task.ps1 -Action Install` registers **OZY Translator Local**, initially disabled.
+After Render is suspended, `local_task.ps1 -Action Start` enables and starts it.
+`local_task.ps1 -Action Stop` disables its future starts and stops the running task.
+Use `local_task.ps1 -Action Status` to inspect its state. Run these commands in PowerShell.
+
+The task runs without a console at this user's Windows sign-in, using the project's
+virtual environment. It does not start before sign-in or survive signing out.
+Locking the screen is fine. The runner prevents automatic idle sleep while it runs;
+the display can turn off. Manual sleep, shutdown and internet outages still interrupt
+translation. No permanent power settings are changed. The runner retries stopped bot sessions with a
+5–60 second delay; Task Scheduler also retries failed runner processes every minute.
+
+Logs rotate in `data/logs/translator.log` (5 MB per file, five backups). A file lock
+rejects duplicate local runners; it cannot detect a bot on another computer or one
+started directly with `bot.py`. Local health binds to `127.0.0.1` on the configured
+PORT (normally `http://127.0.0.1:10000/healthz`). Self-ping is disabled locally. The
+shared `.env` file is unchanged. Message mappings stay in the configured local SQLite file.
+
+For rollback, stop the local task before resuming Render. Pending in-memory events
+are not transferred between hosts. Never run both copies to test the cutover.
+
 - Argos Translate 1.11.0 runs locally on CPU; no Google/deep-translator adapter or translation API key.
 - Fourteen directional models: English to/from Spanish, Arabic, German, French, Norwegian, Portuguese and Italian.
   Discord code `no` maps to Argos `nb`. Other pairs run sequentially through English.
