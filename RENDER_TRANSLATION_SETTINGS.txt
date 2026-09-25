@@ -36,5 +36,7 @@ Rebuild when changing active languages.
 
 A free Render service may sleep/restart; self-ping is not an uptime guarantee.
 RAM and CPU suitability must be measured on Render. No paid plan is required by this code.
-Native inference cannot be interrupted; after timeout, further jobs are skipped until
-it finishes. A permanently stuck native call requires a process restart.
+Inference runs in a separate process. On timeout/cancellation it is killed and reaped;
+the next request starts a fresh worker. Waiting for the slot does not consume its timeout.
+The bot can still lose pending messages if Render restarts the entire service.
+No new environment variables are required for worker recovery.

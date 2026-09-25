@@ -18,9 +18,18 @@ No channels or roles are deleted.
   Translating surrounding fragments separately can reduce fluency.
 - Failed translations are skipped. Originals are never reposted as a failure fallback.
   An unsuccessful edit leaves the last successfully delivered copy unchanged.
-- A task timeout includes time waiting for the translation slot. Native inference cannot be killed
-  by asyncio: while an expired/cancelled call is still running, new requests are skipped.
-  If it never returns, restart the process.
+- Translation and asset validation run in one separate worker process. A timed-out or cancelled
+  translation kills and reaps that worker before another request starts. The next request starts
+  a fresh worker. The Discord process does not import the heavyweight inference libraries.
+- The translation timeout starts after acquiring the translation slot; waiting destinations
+  retain their full inference allowance. Non-English destinations reuse the last English pivot
+  in worker memory, avoiding repeated source-to-English inference for the same text.
+- Health reports worker restarts and last accepted/completed message timestamps. Logs include
+  source message IDs when messages enter and leave the queue, without their contents.
+- These protections do not guarantee that all processes fit Render's memory limit, prevent
+  host sleep/restarts, or recover messages sent while the bot is offline. Pending events remain
+  in memory and can be lost when the whole service restarts. Verify Render Events/Metrics before
+  attributing a restart to memory; a successful translation log is not a delivery confirmation.
 - Reaction sources use local `langdetect`; unsupported or low-confidence detections are skipped.
   Short, mixed-language or slang messages can still be confidently misidentified.
 

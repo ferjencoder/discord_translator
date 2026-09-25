@@ -19,7 +19,6 @@ from state import MessageState
 from startup_retry import is_cloudflare_1015, retry_after_from_exception
 from text_utils import chunk_text, clean_preview
 from translator import TranslationResult, TranslationService
-from check_argos_models import validate_models
 
 logging.basicConfig(
     level=logging.INFO,
@@ -115,11 +114,13 @@ class TranslatorBot(discord.Client):
         # A broken EN webhook must not stop ES/FR/DE/etc.
         self._webhook_quarantine_until: dict[int, float] = {}
         self.startup_error: BaseException | None = None
+        self.last_message_received_at: str | None = None
+        self.last_event_completed_at: str | None = None
 
     async def setup_hook(self) -> None:
         # Health port is already bound. Check local assets before starting workers
         # or declaring the bot operational; this check never downloads models.
-        await asyncio.to_thread(validate_models)
+        await self.translator.validate()
         self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
         await self.state.initialize()
         removed = await self.state.cleanup(self.settings.state_retention_days)
@@ -306,6 +307,7 @@ class TranslatorBot(discord.Client):
         if self.http_session and not self.http_session.closed:
             await self.http_session.close()
 
+        await self.translator.close()
         await super().close()
 
     async def _self_ping_loop(self) -> None:
@@ -463,6 +465,9 @@ class TranslatorBot(discord.Client):
         if message.author.bot or message.webhook_id:
             return
 
+        log.info("Message accepted source=%s channel=%s queue=%d", message.id,
+                 message.channel.id, self.event_queue.qsize())
+        self.last_message_received_at = datetime.now(timezone.utc).isoformat()
         await self.event_queue.put(
             TranslationEvent(
                 kind="create",
@@ -595,6 +600,9 @@ class TranslatorBot(discord.Client):
                     event.source_message_id,
                 )
             finally:
+                self.last_event_completed_at = datetime.now(timezone.utc).isoformat()
+                log.info("Message event finished kind=%s source=%s remaining=%d",
+                         event.kind, event.source_message_id, self.event_queue.qsize())
                 self.event_queue.task_done()
 
     async def _reaction_worker(self) -> None:
@@ -1061,6 +1069,8 @@ class TranslatorBot(discord.Client):
             sent_ids.append(message.id)
 
         await self.state.replace_target(source_message_id, target.spec.channel_id, sent_ids)
+        log.info("Destination delivered source=%s target=%s chunks=%d",
+                 source_message_id, target.spec.lang.upper(), len(sent_ids))
 
     async def _webhook_send_with_retry(
         self,
@@ -1359,6 +1369,8 @@ async def _start_service_health_server(
             "discord_ready": discord_ready,
             "queue_depth": queue_depth,
             "reaction_queue_depth": reaction_queue_depth,
+            "last_message_received_at": getattr(client, "last_message_received_at", None),
+            "last_event_completed_at": getattr(client, "last_event_completed_at", None),
             "translation_cooldown_seconds": translation_cooldown,
             "startup_retry_seconds": runtime.get("startup_retry_seconds", 0),
             "startup_error": runtime.get("startup_error"),

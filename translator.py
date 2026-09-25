@@ -7,6 +7,7 @@ import os
 import time
 from dataclasses import dataclass
 import traceback
+from argos_process import ArgosProcess, ArgosWorkerError
 from check_argos_models import MissingArgosModel, MissingSentenceModel, sentence_model_path
 from argos_config import active_languages, configure_argos, model_code
 from text_utils import PROTECTED_PATTERN
@@ -43,6 +44,7 @@ class ArgosBackend:
         self.languages = active_languages()
         self.low_memory = os.environ["ARGOS_LOW_MEMORY"].lower() in {"1", "true", "yes", "on"}
         self._cached = {}
+        self._pivot = None
 
     def detect(self, text):
         from langdetect import DetectorFactory, detect_langs
@@ -88,8 +90,13 @@ class ArgosBackend:
             raise ValueError("InactiveLanguage")
         if source == target:
             return text
-        if source != "en" and target != "en":
-            text = self._leg(text, source, "en")
+        if source != "en":
+            key = (text, source)
+            if self._pivot is None or self._pivot[0] != key:
+                self._pivot = (key, self._leg(text, source, "en"))
+            text = self._pivot[1]
+            if target == "en":
+                return text
             source = "en"
         return self._leg(text, source, target)
 
@@ -99,7 +106,7 @@ class TranslationService:
                  task_timeout_seconds, backend=None):
         if concurrency != 1:
             raise ValueError("Local Argos requires TRANSLATION_CONCURRENCY=1")
-        self._backend = backend if backend is not None else ArgosBackend()
+        self._backend = backend if backend is not None else ArgosProcess()
         self._semaphore = asyncio.Semaphore(1)
         self._start_interval = start_interval_seconds
         self._retries = retries
@@ -140,9 +147,21 @@ class TranslationService:
             await asyncio.sleep(max(0, self._next_start - time.monotonic()))
             self._next_start = time.monotonic() + self._start_interval
             self._running_since = time.monotonic()
+            if isinstance(self._backend, ArgosProcess):
+                self._running = asyncio.create_task(self._backend.translate(text, source, target))
+                return await asyncio.wait_for(self._running, self._task_timeout)
             self._running = asyncio.create_task(asyncio.to_thread(self._translate_sync, text, source, target))
             self._running.add_done_callback(self._consume_background_error)
-            return await asyncio.shield(self._running)
+            return await asyncio.wait_for(asyncio.shield(self._running), self._task_timeout)
+
+    async def validate(self):
+        if isinstance(self._backend, ArgosProcess):
+            async with self._semaphore:
+                return await asyncio.wait_for(self._backend.validate(), max(120, self._task_timeout))
+
+    async def close(self):
+        if isinstance(self._backend, ArgosProcess):
+            await self._backend.close()
 
     @staticmethod
     def _consume_background_error(task):
@@ -154,7 +173,7 @@ class TranslationService:
             return TranslationResult(text, True, 0)
         for attempt in range(1, self._retries + 1):
             try:
-                translated = await asyncio.wait_for(self._run(text, source, target), self._task_timeout)
+                translated = await self._run(text, source, target)
                 self._last_result = {"ok": True, "source": source, "target": target, "error": None}
                 return TranslationResult(translated, True, attempt)
             except asyncio.TimeoutError:
@@ -162,7 +181,7 @@ class TranslationService:
                 return TranslationResult("", False, attempt, "TimeoutError", timeout_errors=1)
             except Exception as exc:
                 error = type(exc).__name__
-                if isinstance(exc, (MissingArgosModel, MissingSentenceModel, ArgosBusy)):
+                if isinstance(exc, (MissingArgosModel, MissingSentenceModel, ArgosBusy, ArgosWorkerError)):
                     detail = str(exc)  # Our messages contain only paths/codes, never chat.
                 else:
                     # Stack locations aid diagnosis without logging third-party exception
@@ -179,6 +198,7 @@ class TranslationService:
         return {"provider": "Argos Translate (local CPU)",
                 "cooldown_remaining_seconds": 0.0,
                 "busy": busy,
+                "worker_restarts": self._backend.restarts if isinstance(self._backend, ArgosProcess) else 0,
                 "inference_elapsed_seconds": round(time.monotonic() - self._running_since, 1)
                 if busy and self._running_since is not None else 0.0,
                 "last_result": self._last_result}
